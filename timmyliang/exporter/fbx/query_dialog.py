@@ -128,9 +128,25 @@ class QueryDialog(object):
         m.SelectComboOption(c, saved if saved in options else options[0])
         return c
 
-    def _add_row(self, grid, row, label_text, widget):
-        self.mqt.AddGridWidget(grid, row, 0, self._label(label_text), 1, 1)
-        self.mqt.AddGridWidget(grid, row, 1, widget, 1, 1)
+    def _add_two_per_row(self, grid, row, items_2col):
+        """Place two labeled-checkbox items side-by-side in one row.
+
+        *items_2col* is a list of (attr_name, setting_key, label, cb_name,
+        default) tuples; at most 2 are consumed per call.
+
+        Layout (4 virtual columns):
+          col 0 = label-1   col 1 = checkbox-1
+          col 2 = label-2   col 3 = checkbox-2
+        """
+        m = self.mqt
+        for ci, (attr_name, setting_key, label, cb_name, default) in enumerate(items_2col[:2]):
+            chk = m.CreateCheckbox(getattr(self, cb_name))
+            m.SetWidgetChecked(chk, self.settings.value(setting_key, default) == "true")
+            setattr(self, attr_name, chk)
+            m.AddGridWidget(grid, row, ci * 2,     self._label(label), 1, 1)
+            m.AddGridWidget(grid, row, ci * 2 + 1, chk,                1, 1)
+
+
 
     def _section(self, grid, row, title):
         self.mqt.AddGridWidget(grid, row, 0, self._label("-- %s --" % title), 1, 2)
@@ -212,18 +228,15 @@ class QueryDialog(object):
         self._section(grid, r, "VS Output Extras (from VS Input)"); r += 1
 
         _vsout_checks = [
-            ("vsout_uv_check",      "VSOutIncludeVSInUV",      "UV",       "_on_vsout_uv"),
-            ("vsout_uv2_check",     "VSOutIncludeVSInUV2",     "UV2",      "_on_vsout_uv2"),
-            ("vsout_normal_check",  "VSOutIncludeVSInNormal",  "Normal",   "_on_vsout_normal"),
-            ("vsout_tangent_check", "VSOutIncludeVSInTangent", "Tangent",  "_on_vsout_tangent"),
-            ("vsout_binorm_check",  "VSOutIncludeVSInBinormal","BiNormal", "_on_vsout_binorm"),
-            ("vsout_color_check",   "VSOutIncludeVSInColor",   "Color",    "_on_vsout_color"),
+            ("vsout_uv_check",      "VSOutIncludeVSInUV",      "UV",       "_on_vsout_uv",      "true"),
+            ("vsout_uv2_check",     "VSOutIncludeVSInUV2",     "UV2",      "_on_vsout_uv2",     "true"),
+            ("vsout_normal_check",  "VSOutIncludeVSInNormal",  "Normal",   "_on_vsout_normal",  "true"),
+            ("vsout_tangent_check", "VSOutIncludeVSInTangent", "Tangent",  "_on_vsout_tangent", "true"),
+            ("vsout_binorm_check",  "VSOutIncludeVSInBinormal","BiNormal", "_on_vsout_binorm",  "true"),
+            ("vsout_color_check",   "VSOutIncludeVSInColor",   "Color",    "_on_vsout_color",   "true"),
         ]
-        for attr_name, setting_key, label, cb_name in _vsout_checks:
-            chk = m.CreateCheckbox(getattr(self, cb_name))
-            m.SetWidgetChecked(chk, self.settings.value(setting_key, "true") == "true")
-            setattr(self, attr_name, chk)
-            self._add_row(grid, r, label, chk); r += 1
+        for i in range(0, len(_vsout_checks), 2):
+            self._add_two_per_row(grid, r, _vsout_checks[i:i+2]); r += 1
 
         # ── Bake World Space (VS Output only) ─────────────────────────────
         self.bake_world_check = m.CreateCheckbox(self._on_bake_world)
@@ -267,12 +280,14 @@ class QueryDialog(object):
         self.flip_u_check = m.CreateCheckbox(self._on_flip_u)
         m.SetWidgetChecked(self.flip_u_check,
             self.settings.value("FlipU", "false") == "true")
-        self._add_row(grid, r, "Flip U", self.flip_u_check); r += 1
-
         self.flip_v_check = m.CreateCheckbox(self._on_flip_v)
         m.SetWidgetChecked(self.flip_v_check,
             self.settings.value("FlipV", "true") == "true")
-        self._add_row(grid, r, "Flip V", self.flip_v_check); r += 1
+        m.AddGridWidget(grid, r, 0, self._label("Flip U"), 1, 1)
+        m.AddGridWidget(grid, r, 1, self.flip_u_check, 1, 1)
+        m.AddGridWidget(grid, r, 2, self._label("Flip V"), 1, 1)
+        m.AddGridWidget(grid, r, 3, self.flip_v_check, 1, 1)
+        r += 1
 
         # ── Texture ────────────────────────────────────────────────────
         self._section(grid, r, "Texture Export"); r += 1
