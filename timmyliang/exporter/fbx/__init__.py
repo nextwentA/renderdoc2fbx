@@ -765,6 +765,27 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
                     raw = [v / 255.0 for v in raw]
                 # half-float "e" is already a Python float — no conversion needed
                 verts.append(raw)
+
+            # ── Auto-detect half-float UV mislabeled as float32 ───────────────
+            # VK_FORMAT_R16G16_SFLOAT is 2 bytes/component, but RenderDoc may
+            # report compByteWidth=4 (treating the 4-byte pair as one float32).
+            # Reading 2×float32 from 4-byte half-float data gives values ~1e-5:
+            # the IEEE-754 half-float bytes pattern is tiny when reinterpreted
+            # as float32.  Detect this and re-read as float16.
+            if key in ("UV", "UV2") and fc == "f" and comp == 2 and len(verts) > 5:
+                sample = [abs(v) for e in verts[:20] for v in e if v == v]  # filter NaN
+                if sample and max(sample) < 0.01:
+                    hf = []
+                    for vi in range(nv):
+                        base = vi * stride + off
+                        if base + comp * 2 > len(vb_data):  # 2 half-floats = 4 bytes
+                            break
+                        hf.append(list(struct.unpack_from("<2e", vb_data, base)))
+                    if hf:
+                        verts = hf
+                        info_list.append("  %s: half-float16 auto-corrected (float32 max was %.2e)" % (
+                            key, max(sample)))
+
             attr_data[attr_name] = verts
             info_list.append("  %s=%r -> OK  %d verts  comp=%d  byteOff=%d  fmt=%s" % (
                 key, attr_name, len(verts), comp, off, fc))
