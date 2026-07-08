@@ -2675,10 +2675,17 @@ def prepare_export(pyrenderdoc, data):
         if data is None:
             return data, attr_list
         added = {}
+        # Location 1 (Tangent) and 2 (Normal) are skipped for bidirectional
+        # aliasing: the actual content varies by game/UE version and causes
+        # wrong normals when auto-aliased.  Positions (0) and UV/Color (3+)
+        # are safe to alias automatically.
+        _SKIP_LOCS = {1, 2}
         for k in list(data.keys()):
             if k.startswith("_input"):
                 try:
                     n     = int(k[len("_input"):])
+                    if n in _SKIP_LOCS:
+                        continue
                     alias = "ATTRIBUTE%d" % n
                     if alias not in data:
                         added[alias] = data[k]
@@ -2687,6 +2694,8 @@ def prepare_export(pyrenderdoc, data):
             elif k.startswith("ATTRIBUTE"):
                 try:
                     n     = int(k[len("ATTRIBUTE"):])
+                    if n in _SKIP_LOCS:
+                        continue
                     alias = "_input%d" % n
                     if alias not in data:
                         added[alias] = data[k]
