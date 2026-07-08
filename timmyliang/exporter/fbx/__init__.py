@@ -687,14 +687,33 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
                 computed_offsets = nat_offs
                 info_list.append("vsin_gpu offsets: natural  total=%d stride=%d" % (nat_cum, stride))
             else:
-                # Neither fits; use natural and warn
+                # Neither standard strategy fits the stride.
+                # The most common explanation is trailing per-vertex padding:
+                # attributes are packed tightly (natural layout), and the
+                # remainder of the stride is unused space.  As long as
+                # nat_cum <= stride, natural offsets are safe to use.
                 computed_offsets = nat_offs
-                info_list.append("vsin_gpu offsets: UNKNOWN  nat=%d aln=%d stride=%d" % (nat_cum, aln_cum, stride))
+                if nat_cum <= stride:
+                    info_list.append("vsin_gpu offsets: natural+pad  nat=%d stride=%d" % (nat_cum, stride))
+                else:
+                    info_list.append("vsin_gpu offsets: FALLBACK nat=%d aln=%d stride=%d" % (nat_cum, aln_cum, stride))
+
+        # Identify comp=2 slots as UV candidates (hint for user)
+        uv_hints = [
+            "_input%d/ATTRIBUTE%d(off%d)" % (loc, loc, computed_offsets[i])
+            for i, (_, loc, comp, _, _) in enumerate(slot_info) if comp == 2
+        ]
+        if uv_hints:
+            info_list.append("vsin_gpu UV_candidates(comp=2): %s" % " ".join(uv_hints))
 
         layout = {}   # name_variant -> (byteOffset, compCount, compByteWidth, fmtChar)
         for idx, (slot_i, loc, comp, width, _) in enumerate(slot_info):
             off  = computed_offsets[idx]
-            fc   = "f" if width == 4 else "d"
+            # Format char: 4-byte→float, 2-byte→half-float, 1-byte→signed byte
+            if   width == 4: fc = "f"
+            elif width == 2: fc = "e"   # half-float (Python ≥ 3.6)
+            elif width == 1: fc = "b"   # int8 (packed SNORM tangent/normal)
+            else:            fc = "f"
             info = (off, comp, width, fc)
 
             # Collect name aliases
@@ -738,11 +757,17 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
                 base = vi * stride + off
                 if base + comp * width > len(vb_data):
                     break
-                comps = list(struct.unpack_from("<%d%s" % (comp, fc), vb_data, base))
-                verts.append(comps)
+                raw = list(struct.unpack_from("<%d%s" % (comp, fc), vb_data, base))
+                # Normalise packed integer types to float range
+                if fc == "b":          # int8 SNORM → [-1, 1]
+                    raw = [v / 127.0 for v in raw]
+                elif fc == "B":        # uint8 UNORM → [0, 1]
+                    raw = [v / 255.0 for v in raw]
+                # half-float "e" is already a Python float — no conversion needed
+                verts.append(raw)
             attr_data[attr_name] = verts
-            info_list.append("  %s=%r -> OK  %d verts  comp=%d  byteOff=%d" % (
-                key, attr_name, len(verts), comp, off))
+            info_list.append("  %s=%r -> OK  %d verts  comp=%d  byteOff=%d  fmt=%s" % (
+                key, attr_name, len(verts), comp, off, fc))
 
     except Exception:
         import traceback
@@ -977,6 +1002,12 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
         vsout_tangent = mapper.get("VSOUT_INCLUDE_VSIN_TANGENT", True)
         vsout_binorm  = mapper.get("VSOUT_INCLUDE_VSIN_BINORMAL",True)
         vsout_color   = mapper.get("VSOUT_INCLUDE_VSIN_COLOR",   True)
+
+        # Warn when all pass-through options are disabled
+        flags = [vsout_uv, vsout_uv2, vsout_normal, vsout_tangent, vsout_binorm, vsout_color]
+        if not any(flags):
+            info_list.append("WARNING: ALL VS-In pass-through checkboxes are OFF "
+                             "→ open Export Mesh dialog and check them in 'VS Output Extras'")
 
         layer_uv      = "";  layer_uv_ins  = ""
         layer_uv2     = "";  layer_uv2_ins = ""
