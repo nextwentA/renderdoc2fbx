@@ -389,17 +389,6 @@ def export_fbx(save_path, mapper, data, attr_list, controller):
         def run_normals(self):
             if not vertex_data.get(NORMAL):
                 return
-            # ── Diagnostic: show first-vertex values for NORMAL & TANGENT ──
-            # If normals look like tangents, ATTRIBUTE1/ATTRIBUTE2 may be swapped.
-            # Check: normal vectors should be ~unit-length; dot(normal, tangent)≈0.
-            _nv0 = next(iter(vertex_data[NORMAL].values()), None)
-            TANGENT_key = mapper.get("TANGENT", "")
-            _tv0 = (next(iter(vertex_data[TANGENT_key].values()), None)
-                    if TANGENT_key and vertex_data.get(TANGENT_key) else None)
-            _ndiag = [round(v, 3) for v in _nv0[:3]] if _nv0 else []
-            _tdiag = [round(v, 3) for v in _tv0[:3]] if _tv0 else []
-            print("[normals diag] nrm_v0=%s  tan_v0=%s" % (_ndiag, _tdiag))
-
             normal_values      = reorder_triangle_corners(value_dict[NORMAL])
             transformed_normals = [transform_unreal_vector(v) for v in normal_values]
             normals = [str(v) for values in transformed_normals for v in values]
@@ -2713,9 +2702,6 @@ def prepare_export(pyrenderdoc, data):
             ("POSITION",  ["_input0", "ATTRIBUTE0"]),
             ("VERTEX",    ["_input0", "ATTRIBUTE0"]),   # Godot
             ("SV_Position",["_input0","ATTRIBUTE0"]),
-            ("NORMAL",    ["_input2", "ATTRIBUTE2"]),
-            ("TANGENT",   ["_input1", "ATTRIBUTE1"]),
-            ("BINORMAL",  ["_input3", "ATTRIBUTE3"]),
             ("TEXCOORD0", ["_input3", "ATTRIBUTE3", "_input4", "ATTRIBUTE4"]),
             ("TEXCOORD1", ["_input4", "ATTRIBUTE4", "_input5", "ATTRIBUTE5"]),
             ("UV",        ["_input3", "ATTRIBUTE3", "_input4", "ATTRIBUTE4"]),
