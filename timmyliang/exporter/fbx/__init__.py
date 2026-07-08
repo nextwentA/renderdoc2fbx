@@ -98,6 +98,8 @@ FBX_ASCII_TEMPLETE = """
                 P: "DefaultAttributeIndex", "int", "Integer", "",0
             }
         }
+%(FbxMaterialObjects)s
+%(FbxSkinObjects)s
     }
 
     ; Object connections
@@ -111,9 +113,113 @@ FBX_ASCII_TEMPLETE = """
         ;Geometry::, Model::pCube1
         C: "OO",2035541511296,2035615390896
 
+%(FbxMaterialConnections)s
+%(FbxSkinConnections)s
     }
 
     """
+
+
+def _build_fbx_material(save_dir, fbx_name):
+    """Scan *save_dir* for images previously exported alongside the FBX and
+    build FBX ASCII Material + Texture node strings (Objects section) and
+    the corresponding Connection entries.
+
+    Returns (material_objects_str, material_connections_str).  Both are empty
+    strings when no suitable textures are found.
+    """
+    import re as _re
+
+    # Collect image files in the same directory
+    _img_exts = {".png", ".jpg", ".jpeg", ".tga", ".dds", ".bmp", ".hdr", ".exr"}
+    try:
+        _all_files = [
+            f for f in os.listdir(save_dir)
+            if os.path.splitext(f)[1].lower() in _img_exts
+        ]
+    except OSError:
+        return "", ""
+
+    if not _all_files:
+        return "", ""
+
+    # Classify textures by common suffix patterns
+    _NORMAL_SUFFIXES  = re.compile(r"_n(rm|ormal|ormal_map)?$", re.IGNORECASE)
+    _ROUGH_SUFFIXES   = re.compile(r"_(rough|roughness|orm|pbr)$", re.IGNORECASE)
+    _METAL_SUFFIXES   = re.compile(r"_(metal|metallic|m)$",        re.IGNORECASE)
+    _EMIT_SUFFIXES    = re.compile(r"_(emit|emissive|e)$",          re.IGNORECASE)
+
+    _diffuse   = None   # first non-special image (probably diffuse / albedo)
+    _normal_m  = None
+    _rough_m   = None
+    _emissive  = None
+
+    for _f in sorted(_all_files):
+        _stem = os.path.splitext(_f)[0]
+        if _NORMAL_SUFFIXES.search(_stem):
+            _normal_m = _normal_m or _f
+        elif _ROUGH_SUFFIXES.search(_stem) or _METAL_SUFFIXES.search(_stem):
+            _rough_m = _rough_m or _f
+        elif _EMIT_SUFFIXES.search(_stem):
+            _emissive = _emissive or _f
+        else:
+            _diffuse = _diffuse or _f
+
+    # Build texture list: (channel_name, filename, prop_name)
+    _TEX_SLOTS = []
+    if _diffuse:   _TEX_SLOTS.append(("DiffuseColor", _diffuse,  "DiffuseColor"))
+    if _normal_m:  _TEX_SLOTS.append(("NormalMap",    _normal_m, "NormalMap"))
+    if _rough_m:   _TEX_SLOTS.append(("Roughness",    _rough_m,  "SpecularColor"))
+    if _emissive:  _TEX_SLOTS.append(("Emissive",     _emissive, "EmissiveColor"))
+
+    if not _TEX_SLOTS:
+        return "", ""
+
+    # Assign deterministic IDs (well beyond the Geometry/Model IDs above)
+    _MAT_ID  = 3000000000001
+    _OBJ_BLK = ""
+    _CON_BLK = ""
+
+    # Material node
+    _OBJ_BLK += """
+        Material: %d, "Material::%s_mat", "" {
+            Version: 102
+            ShadingModel: "phong"
+            MultiLayer: 0
+            Properties70:  {
+                P: "AmbientColor",  "Color", "", "A",0.1,0.1,0.1
+                P: "DiffuseColor",  "Color", "", "A",0.8,0.8,0.8
+            }
+        }""" % (_MAT_ID, fbx_name)
+
+    _CON_BLK += "\n        ;Material, Model\n"
+    _CON_BLK += "        C: \"OO\",%d,2035615390896\n" % _MAT_ID
+
+    for _ci, (_chan, _fname, _prop) in enumerate(_TEX_SLOTS):
+        _tex_id = _MAT_ID + _ci + 1
+        _rel    = "./%s" % _fname
+        _OBJ_BLK += """
+        Texture: %d, "Texture::%s", "" {
+            Type: "TextureVideoClip"
+            Version: 202
+            TextureName: "Texture::%s"
+            Properties70:  {
+                P: "CurrentTextureBlendMode", "enum", "", "",0
+                P: "UVSet",                  "KString","","", "map1"
+            }
+            Media: "Video::%s"
+            FileName: "%s"
+            RelativeFilename: "%s"
+            ModelUVTranslation: 0,0
+            ModelUVScaling: 1,1
+            Texture_Alpha_Source: "None"
+            Cropping: 0,0,0,0
+        }""" % (_tex_id, _chan, _chan, _chan, _fname, _rel)
+
+        _CON_BLK += "        ;Texture::%s, Material::%s_mat\n" % (_chan, fbx_name)
+        _CON_BLK += "        C: \"OP\",%d,%d, \"%s\"\n" % (_tex_id, _MAT_ID, _prop)
+
+    return _OBJ_BLK, _CON_BLK
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +325,10 @@ def export_fbx(save_path, mapper, data, attr_list, controller):
         "LayerElementUVInsert":      "",
         "LayerElementUV2":           "",
         "LayerElementUV2Insert":     "",
+        "FbxMaterialObjects":        "",
+        "FbxMaterialConnections":    "",
+        "FbxSkinObjects":            "",
+        "FbxSkinConnections":        "",
     }
 
     POSITION = mapper.get("POSITION")
@@ -464,6 +574,11 @@ def export_fbx(save_path, mapper, data, attr_list, controller):
 
     handler = ProcessHandler()
     handler.run()
+
+    save_dir = os.path.dirname(save_path)
+    _mat_objs, _mat_cons = _build_fbx_material(save_dir, save_name)
+    ARGS["FbxMaterialObjects"]     = _mat_objs
+    ARGS["FbxMaterialConnections"] = _mat_cons
 
     fbx = FBX_ASCII_TEMPLETE % ARGS
 
@@ -935,6 +1050,94 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
             info_list.append("  %s=%r -> OK  %d verts  comp=%d  byteOff=%d  fmt=%s" % (
                 key, attr_name, len(verts), comp, off, fc))
 
+        # ── Auto-detect missing UV2 / Color when Vulkan remaps attribute IDs ──
+        # Vulkan relocates ATTRIBUTE6 (UV2) and ATTRIBUTE13 (Color) to lower
+        # locations that don't match Unreal's D3D semantic numbers.  When the
+        # mapper name isn't found in the layout, scan the vertex buffer for a
+        # candidate that matches the expected component pattern and value range.
+        _uv_attr  = mapper.get("UV",    "")
+        _uv2_attr = mapper.get("UV2",   "")
+        _col_attr = mapper.get("COLOR", "")
+
+        # Compute UV0 centre-of-mass so UV2 candidates can be discriminated.
+        _uv0_cx = _uv0_cy = 0.0
+        _uv0_n  = 0
+        if _uv_attr and attr_data.get(_uv_attr):
+            _uv0s = attr_data[_uv_attr][:50]
+            if _uv0s:
+                _uv0_cx = sum(e[0] for e in _uv0s) / len(_uv0s)
+                _uv0_cy = sum(e[1] for e in _uv0s) / len(_uv0s)
+                _uv0_n  = len(_uv0s)
+
+        for _mkey, _mattr, _mcomp in [("UV2", _uv2_attr, 2),
+                                       ("COLOR", _col_attr, 4)]:
+            if not _mattr or attr_data.get(_mattr):
+                continue       # already found or not requested
+            info_list.append("  auto-scan %s (attr=%r)…" % (_mkey, _mattr))
+            _best_sc, _best_info = -1, None
+
+            for _avbd, _avbstr in all_vb:
+                _anvb = len(_avbd) // _avbstr if _avbstr > 0 else 0
+                for _aso in range(0, _avbstr, 2):
+                    for _asfmt, _asbpc in [("f", 4), ("e", 2), ("B", 1), ("b", 1)]:
+                        _anb = _mcomp * _asbpc
+                        if _aso + _anb > _avbstr:
+                            continue
+                        _asv = []
+                        for _avi in range(min(50, _anvb)):
+                            _ab = _avi * _avbstr + _aso
+                            if _ab + _anb > len(_avbd): break
+                            _araw = list(struct.unpack_from(
+                                "<%d%s" % (_mcomp, _asfmt), _avbd, _ab))
+                            if _asfmt == "b": _araw = [v/127.0 for v in _araw]
+                            elif _asfmt == "B": _araw = [v/255.0 for v in _araw]
+                            _asv.append(_araw)
+                        if len(_asv) < 5: continue
+                        _avals = [v for e in _asv for v in e]
+
+                        if _mkey == "UV2":
+                            _aus = [e[0] for e in _asv]
+                            _avs = [e[1] for e in _asv]
+                            _ura = max(_aus) - min(_aus) if _aus else 0
+                            _vra = max(_avs) - min(_avs) if _avs else 0
+                            _amx = max(abs(v) for v in _avals)
+                            if not (0.001 <= _amx <= 10 and _ura >= 0.02 and _vra >= 0.02):
+                                continue
+                            # Reject if centre matches UV0 (same channel)
+                            if _uv0_n:
+                                _acx = sum(_aus) / len(_aus)
+                                _acy = sum(_avs) / len(_avs)
+                                if abs(_acx - _uv0_cx) + abs(_acy - _uv0_cy) < 0.05:
+                                    continue
+                            _asc = (sum(1 for v in _avals if 0.001 <= abs(v) <= 10) +
+                                    len(set(round(v, 2) for v in _avals)))
+                        else:  # COLOR
+                            # UNORM: all values in [0,1], none negative
+                            if any(v < -0.01 for v in _avals): continue
+                            if max(_avals) > 1.05: continue
+                            _asc = (sum(1 for v in _avals if v > 0.001) +
+                                    len(set(round(v, 2) for v in _avals)))
+
+                        if _asc > _best_sc:
+                            _best_sc   = _asc
+                            _best_info = (_avbd, _avbstr, _anvb, _aso, _asfmt, _asbpc)
+
+            if _best_info:
+                _avbd, _avbstr, _anvb, _aso, _asfmt, _asbpc = _best_info
+                _afinal = []
+                for _avi in range(_anvb):
+                    _ab = _avi * _avbstr + _aso
+                    if _ab + _mcomp * _asbpc > len(_avbd): break
+                    _araw = list(struct.unpack_from(
+                        "<%d%s" % (_mcomp, _asfmt), _avbd, _ab))
+                    if _asfmt == "b": _araw = [v/127.0 for v in _araw]
+                    elif _asfmt == "B": _araw = [v/255.0 for v in _araw]
+                    _afinal.append(_araw)
+                if _afinal:
+                    attr_data[_mattr] = _afinal
+                    info_list.append("  %s=%r auto-found: off=%d fmt=%s score=%d %dverts" % (
+                        _mkey, _mattr, _aso, _asfmt, _best_sc, len(_afinal)))
+
     except Exception:
         import traceback
         info_list.append("vsin_gpu ERROR: " + traceback.format_exc().split('\n')[-2])
@@ -983,6 +1186,232 @@ def _read_index_buffer(fmt, controller):
         return indices
     except Exception:
         return None
+
+
+def _scan_bone_data(vb_data, stride, nv, nat_cum, info_list=None):
+    """Scan the 'extra' region of a vertex buffer for bone weight/index data.
+
+    Looks for two adjacent regions:
+      • BoneWeights: N×float or N×uint8  all in [0,1], sum ≈ 1.0
+      • BoneIndices: N×uint8 or N×uint16 all small integers (0-255)
+
+    Returns (weights_list, indices_list) where each list has *nv* entries of
+    length N (N = 4 or 8), or (None, None) if nothing convincing is found.
+    """
+    if nat_cum >= stride or nv < 5:
+        return None, None
+
+    IDENTITY_4x4 = [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]
+
+    # Try n_bones=4 first, then 8 (common in UE4/UE5)
+    for n_bones in (4, 8):
+        # Strategy A: float weights (4B each) + byte indices (1B each)
+        for wfmt, wbpc in [("f", 4), ("B", 1)]:  # try float32 then uint8 weights
+            for ifmt, ibpc in [("B", 1), ("H", 2)]:  # byte then uint16 indices
+                _w_sz = n_bones * wbpc
+                _i_sz = n_bones * ibpc
+                # Try every 4-byte-aligned offset in the extra region
+                for _woff in range(nat_cum, stride - _w_sz - _i_sz + 1, 4):
+                    _ioff = _woff + _w_sz
+                    if _ioff + _i_sz > stride:
+                        continue
+                    # Sample first min(20, nv) vertices
+                    _wsamples = []
+                    _isamples = []
+                    ok = True
+                    for _vi in range(min(20, nv)):
+                        _wb = _vi * stride + _woff
+                        _ib = _vi * stride + _ioff
+                        if _wb + _w_sz > len(vb_data) or _ib + _i_sz > len(vb_data):
+                            ok = False; break
+                        _w = list(struct.unpack_from("<%d%s" % (n_bones, wfmt), vb_data, _wb))
+                        _i = list(struct.unpack_from("<%d%s" % (n_bones, ifmt), vb_data, _ib))
+                        if wfmt == "B": _w = [v/255.0 for v in _w]
+                        # Validate: weights in [0,1], sum ≈ 1, indices are small ints
+                        if any(w < -0.01 or w > 1.05 for w in _w): ok = False; break
+                        if abs(sum(_w) - 1.0) > 0.15: ok = False; break
+                        if any(idx > 512 for idx in _i): ok = False; break
+                        _wsamples.append(_w)
+                        _isamples.append(_i)
+                    if not ok or len(_wsamples) < 5:
+                        continue
+                    # Passed all checks — read all vertices
+                    all_w, all_i = [], []
+                    for _vi in range(nv):
+                        _wb = _vi * stride + _woff
+                        _ib = _vi * stride + _ioff
+                        if _wb + _w_sz > len(vb_data) or _ib + _i_sz > len(vb_data):
+                            break
+                        _w = list(struct.unpack_from("<%d%s" % (n_bones, wfmt), vb_data, _wb))
+                        _i = list(struct.unpack_from("<%d%s" % (n_bones, ifmt), vb_data, _ib))
+                        if wfmt == "B": _w = [v/255.0 for v in _w]
+                        all_w.append(_w)
+                        all_i.append(_i)
+                    if len(all_w) >= nv * 0.9:
+                        if info_list is not None:
+                            info_list.append(
+                                "bone_scan: %d bones woff=%d wfmt=%s ioff=%d ifmt=%s "
+                                "(%d verts)" % (n_bones, _woff, wfmt, _ioff, ifmt, len(all_w)))
+                        return all_w, all_i
+    return None, None
+
+
+def _build_fbx_skin(weights_list, indices_list, n_verts, geom_id=2035541511296):
+    """Build FBX ASCII SkinDeformer + Cluster nodes from bone data.
+
+    *weights_list*  – list of per-vertex weight arrays  (len == n_verts)
+    *indices_list*  – list of per-vertex bone-index arrays
+    *n_verts*       – total vertex count (needed for identity transforms)
+    *geom_id*       – the Geometry node ID to attach the deformer to
+
+    Returns (objects_str, connections_str) to embed in the FBX file.
+    """
+    if not weights_list or not indices_list:
+        return "", ""
+
+    n_bones_per_vert = len(weights_list[0])
+
+    # Discover unique bone indices
+    all_bone_ids = set()
+    for idxs in indices_list:
+        all_bone_ids.update(idxs)
+    all_bone_ids = sorted(all_bone_ids)
+
+    # Build per-bone influence lists
+    bone_verts   = {b: [] for b in all_bone_ids}
+    bone_weights = {b: [] for b in all_bone_ids}
+    for vi, (ws, idxs) in enumerate(zip(weights_list, indices_list)):
+        for w, bi in zip(ws, idxs):
+            if w > 0.001:
+                bone_verts[bi].append(vi)
+                bone_weights[bi].append(w)
+
+    SKIN_ID = 4000000000001
+    _objs = ""
+    _cons = ""
+
+    # Skin deformer node
+    _objs += """
+        Deformer: %d, "Deformer::", "Skin" {
+            Version: 101
+            Link_DeformAcuracy: 50
+        }""" % SKIN_ID
+    _cons += "\n        C: \"OO\",%d,%d\n" % (SKIN_ID, geom_id)
+
+    # Identity transform (4×4 row-major, but FBX wants column-major 16 floats)
+    _identity = ",".join(["1" if i % 5 == 0 else "0" for i in range(16)])
+
+    for bone_idx in all_bone_ids:
+        _cluster_id = SKIN_ID + bone_idx + 1
+        _bverts  = bone_verts[bone_idx]
+        _bwgts   = bone_weights[bone_idx]
+        if not _bverts:
+            continue
+        _vi_str = ",".join(str(v) for v in _bverts)
+        _wg_str = ",".join("%.6f" % w for w in _bwgts)
+
+        # Joint node (placeholder — RenderDoc has no bone hierarchy)
+        _joint_id = _cluster_id + 100000
+        _objs += """
+        Model: %d, "Model::Joint_%d", "LimbNode" {
+            Version: 232
+            Properties70: {
+                P: "RotationActive",  "bool", "", "",1
+                P: "InheritType",     "enum", "", "",1
+            }
+        }""" % (_joint_id, bone_idx)
+
+        _objs += """
+        Deformer: %d, "SubDeformer::", "Cluster" {
+            Version: 100
+            UserData: "", ""
+            Indexes: *%d { a: %s }
+            Weights: *%d { a: %s }
+            Transform: *16 { a: %s }
+            TransformLink: *16 { a: %s }
+        }""" % (_cluster_id, len(_bverts), _vi_str,
+                len(_bwgts), _wg_str, _identity, _identity)
+
+        # Connect joint to model root, cluster to skin deformer, cluster to joint
+        _cons += "        C: \"OO\",%d,0\n" % _joint_id
+        _cons += "        C: \"OO\",%d,%d\n" % (_cluster_id, SKIN_ID)
+        _cons += "        C: \"OO\",%d,%d\n" % (_joint_id, _cluster_id)
+
+    return _objs, _cons
+
+
+def _try_get_view_matrix(controller):
+    """Try to extract the View (or ViewProjection) matrix from VS constant buffer 0.
+
+    Scans the first 512 bytes of the VS stage's first constant buffer for a
+    4×4 float matrix whose upper-left 3×3 is approximately orthonormal
+    (rotation-only) and whose determinant is approximately ±1.  Returns the
+    4×4 matrix as a flat 16-element list (row-major) or None on failure.
+    """
+    try:
+        state = controller.GetPipelineState()
+        vs_cbs = state.GetConstantBuffers(rd.ShaderStage.Vertex)
+        if not vs_cbs:
+            return None
+        cb0 = vs_cbs[0]
+        cb_id = getattr(cb0, 'resourceId', None)
+        if not cb_id or cb_id == rd.ResourceId.Null():
+            return None
+
+        raw = bytes(controller.GetBufferData(cb_id, 0, 512))
+
+        # Slide a 4×4 float window over the buffer and test each candidate
+        for _off in range(0, len(raw) - 64, 4):
+            _m = list(struct.unpack_from("<16f", raw, _off))
+            # Test upper-left 3×3 for approximate orthonormality
+            def _col(c): return [_m[r*4+c] for r in range(3)]
+            c0, c1, c2 = _col(0), _col(1), _col(2)
+            def _dot(a, b): return sum(x*y for x, y in zip(a, b))
+            def _norm(v): return _dot(v, v) ** 0.5
+            n0, n1, n2 = _norm(c0), _norm(c1), _norm(c2)
+            if not (0.9 < n0 < 1.1 and 0.9 < n1 < 1.1 and 0.9 < n2 < 1.1):
+                continue
+            # Check cross-orthogonality: |dot(c0,c1)|, |dot(c0,c2)|, |dot(c1,c2)| < 0.05
+            if (abs(_dot(c0, c1)) > 0.05 or abs(_dot(c0, c2)) > 0.05 or
+                    abs(_dot(c1, c2)) > 0.05):
+                continue
+            # Determinant of 3×3 (cross product c0 × c1 · c2) ≈ ±1
+            _cross = [c0[1]*c1[2]-c0[2]*c1[1],
+                      c0[2]*c1[0]-c0[0]*c1[2],
+                      c0[0]*c1[1]-c0[1]*c1[0]]
+            if abs(abs(_dot(_cross, c2)) - 1.0) > 0.1:
+                continue
+            return _m   # found a valid rotation matrix
+
+    except Exception:
+        pass
+    return None
+
+
+def _mat4_inv_rigid(m):
+    """Invert a rigid-body 4×4 matrix (rotation+translation only, row-major).
+    For a View matrix V, returns V^{-1} (camera-to-world / WorldFromView).
+    Layout: row r, col c → m[r*4+c].
+    """
+    # Transpose the 3×3 rotation part
+    r = [[m[r2*4+c2] for c2 in range(3)] for r2 in range(3)]
+    rt = [[r[c2][r2] for c2 in range(3)] for r2 in range(3)]
+    # Translation = -R^T * t
+    t = [m[0*4+3], m[1*4+3], m[2*4+3]]
+    nt = [-sum(rt[i][j]*t[j] for j in range(3)) for i in range(3)]
+    return [
+        rt[0][0], rt[0][1], rt[0][2], nt[0],
+        rt[1][0], rt[1][1], rt[1][2], nt[1],
+        rt[2][0], rt[2][1], rt[2][2], nt[2],
+        0,        0,        0,        1,
+    ]
+
+
+def _apply_mat4_point(m, x, y, z):
+    """Transform point (x,y,z) by 4×4 row-major matrix m (w=1)."""
+    return (m[0]*x + m[1]*y + m[2]*z + m[3],
+            m[4]*x + m[5]*y + m[6]*z + m[7],
+            m[8]*x + m[9]*y + m[10]*z + m[11])
 
 
 def _export_vsout_fbx(save_path, mapper, info_list, err_list,
@@ -1111,6 +1540,24 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
             vx = cx / m00
             vy = cy / m11
             vertices.extend([vx, vy, view_z])
+
+        # ── Optional: bake view-space → world-space via inv(ViewMatrix) ───────
+        bake_world = mapper.get("BAKE_WORLD_SPACE", False)
+        _view_inv  = None
+        if bake_world:
+            _vm = _try_get_view_matrix(controller)
+            if _vm:
+                _view_inv = _mat4_inv_rigid(_vm)
+                info_list.append("world-space: ViewMatrix found, baking positions")
+            else:
+                info_list.append("world-space: ViewMatrix NOT found, staying view-space")
+        if _view_inv and len(vertices) % 3 == 0:
+            _ws = []
+            for _vi3 in range(len(vertices) // 3):
+                _vx, _vy, _vz = vertices[_vi3*3], vertices[_vi3*3+1], vertices[_vi3*3+2]
+                _wx, _wy, _wz = _apply_mat4_point(_view_inv, _vx, _vy, _vz)
+                _ws.extend([_wx, _wy, _wz])
+            vertices = _ws
 
         if len(vertices) >= 9:
             info_list.append("v0=%s v1=%s v2=%s" % (
@@ -1264,6 +1711,42 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
                             _qt_uv_key, _best_uv_score, len(_uv_map), n_fc))
             except Exception as _e_qt:
                 info_list.append("UV: Qt-table override failed: %s" % str(_e_qt))
+
+        # ── UV2 Qt-table override (second comp=2 key, different from UV0) ─────
+        if vsout_uv2 and UV2 and not vsin_raw.get(UV2) and vs_in_data:
+            try:
+                _uv2_score, _qt_uv2_key = -1, None
+                for _qk2 in ([UV2] if UV2 else []) + ["_input3", "_input4", "_input2"]:
+                    if _qk2 == _qt_uv_key:
+                        continue    # don't re-use the UV0 key
+                    _s2 = vs_in_data.get(_qk2)
+                    if not _s2: continue
+                    if not (hasattr(_s2[0], '__len__') and len(_s2[0]) >= 2): continue
+                    _v2 = [abs(v) for e in _s2[:30] for v in e[:2] if v == v]
+                    if not _v2 or max(_v2) < 0.001: continue
+                    _sc2 = sum(1 for v in _v2 if 0.001 <= v <= 10) + len(set(round(v, 2) for v in _v2))
+                    if _sc2 > _uv2_score:
+                        _uv2_score  = _sc2
+                        _qt_uv2_key = _qk2
+
+                if _qt_uv2_key:
+                    _qt_uv2_corn = vs_in_data[_qt_uv2_key]
+                    _qt_idx2     = vs_in_data.get("IDX", [])
+                    if _qt_idx2 and len(_qt_uv2_corn) >= n_fc:
+                        _qi2 = [int(float(x)) for x in _qt_idx2[:n_fc]]
+                        _min2 = min(_qi2)
+                        _uv2_map = {}
+                        for _fc2 in range(n_fc):
+                            _ni2 = _qi2[_fc2] - _min2
+                            if _ni2 not in _uv2_map:
+                                _uv2_map[_ni2] = list(_qt_uv2_corn[_fc2][:2])
+                        if _uv2_map:
+                            vsin_raw[UV2] = [_uv2_map.get(_i2, [0.0, 0.0])
+                                             for _i2 in range(max(_uv2_map) + 1)]
+                            info_list.append("UV2: Qt-table (%s score=%d) %d unique" % (
+                                _qt_uv2_key, _uv2_score, len(_uv2_map)))
+            except Exception as _e_uv2:
+                info_list.append("UV2: Qt-table failed: %s" % str(_e_uv2))
 
         def _xform3(vals):
             if ENGINE != "unreal":
@@ -1470,6 +1953,39 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
             "Y" if layer_col else "N",
         ))
 
+        # ── Bone weight / SkinDeformer (optional) ────────────────────────────
+        _skin_objs = ""
+        _skin_cons = ""
+        if mapper.get("EXPORT_SKIN", False):
+            try:
+                _pipe  = controller.GetPipelineState()
+                _vb0_d = None
+                _vb0_s = 0
+                try:
+                    _vbs   = _pipe.GetVertexBuffers()
+                    if _vbs:
+                        _vb0   = _vbs[0]
+                        _vb0_d = bytes(controller.GetBufferData(
+                            _vb0.resourceId, _vb0.byteOffset, 0))
+                        _vb0_s = _vb0.byteStride
+                except Exception:
+                    pass
+                if _vb0_d and _vb0_s:
+                    _nv_total = len(vertices) // 3
+                    # nat_cum from mapper or estimate from attribute layout
+                    _nat = 28   # default fallback
+                    _bw, _bi = _scan_bone_data(_vb0_d, _vb0_s, _nv_total, _nat, info_list)
+                    if _bw:
+                        _skin_objs, _skin_cons = _build_fbx_skin(_bw, _bi, _nv_total)
+                        info_list.append("skin: %d bones, %d verts" % (
+                            max(max(idxs) for idxs in _bi) + 1, _nv_total))
+                    else:
+                        info_list.append("skin: no bone data found in VB0")
+            except Exception as _se:
+                info_list.append("skin error: %s" % str(_se)[:80])
+
+        _mat_objs, _mat_cons = _build_fbx_material(
+            os.path.dirname(save_path), save_name)
         ARGS = {
             "model_name":                save_name,
             "vertices":                  ",".join(str(v) for v in vertices),
@@ -1488,6 +2004,10 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
             "LayerElementUVInsert":      layer_uv_ins,
             "LayerElementUV2":           layer_uv2,
             "LayerElementUV2Insert":     layer_uv2_ins,
+            "FbxMaterialObjects":        _mat_objs,
+            "FbxMaterialConnections":    _mat_cons,
+            "FbxSkinObjects":            _skin_objs,
+            "FbxSkinConnections":        _skin_cons,
         }
         fbx = FBX_ASCII_TEMPLETE % ARGS
         with open(save_path, "w") as f:
@@ -1769,6 +2289,8 @@ def _build_settings_mapper(settings):
     mapper["VSOUT_INCLUDE_VSIN_TANGENT"] = settings.value("VSOutIncludeVSInTangent", "true") == "true"
     mapper["VSOUT_INCLUDE_VSIN_BINORMAL"]= settings.value("VSOutIncludeVSInBinormal","true") == "true"
     mapper["VSOUT_INCLUDE_VSIN_COLOR"]   = settings.value("VSOutIncludeVSInColor",   "true") == "true"
+    mapper["BAKE_WORLD_SPACE"]           = settings.value("BakeWorldSpace",           "false") == "true"
+    mapper["EXPORT_SKIN"]                = settings.value("ExportSkin",                "false") == "true"
     return mapper
 
 
@@ -1874,6 +2396,197 @@ def error_log(func):
     return wrapper
 
 
+
+# ---------------------------------------------------------------------------
+# Batch (multi-draw-call) merge helpers
+# ---------------------------------------------------------------------------
+
+def _do_batch_merge(save_path, mapper, event_ids, pyrenderdoc,
+                    info_list, err_list, main_window):
+    """Export *event_ids* (VS Output) and write a combined FBX.
+
+    For each event the replay is advanced to that EID, VS Output data is
+    collected, and vertices/polygons are accumulated with index offsets so
+    all draw calls end up in a single Geometry node.
+    """
+    from functools import partial as _partial
+
+    save_name = os.path.basename(os.path.splitext(save_path)[0])
+
+    # Accumulate across all events
+    all_vertices   = []
+    all_polygons   = []
+    vert_offset    = 0
+    layer_uv       = "";  layer_uv_ins   = ""
+    layer_uv2      = "";  layer_uv2_ins  = ""
+    layer_nrm      = "";  layer_nrm_ins  = ""
+    layer_tan      = "";  layer_tan_ins  = ""
+    layer_bn       = "";  layer_bn_ins   = ""
+    layer_col      = "";  layer_col_ins  = ""
+
+    # Per-layer accumulation lists (strings from each event)
+    _uvs_acc   = [];  _uvi_acc   = []
+    _uv2s_acc  = [];  _uv2i_acc  = []
+    _nrms_acc  = []
+    _tans_acc  = []
+    _bns_acc   = []
+    _cols_acc  = [];  _coli_acc  = []
+
+    for _eid in event_ids:
+        _per_info   = []
+        _per_errors = []
+
+        # Switch replay to this event
+        try:
+            pyrenderdoc.Replay().BlockInvoke(
+                lambda ctrl, eid=_eid: ctrl.SetFrameEvent(eid, True)
+            )
+        except Exception as _e:
+            info_list.append("batch: EID %d skip (SetFrameEvent: %s)" % (_eid, _e))
+            continue
+
+        # Collect VS Input pass-through data (UV/Normal etc.)
+        _vsin_data, _vsin_attrs = _collect_mesh_data(main_window)
+
+        # Temporary file to capture per-event FBX (we parse it back)
+        import tempfile as _tf
+        _tmp = _tf.mktemp(suffix=".fbx")
+
+        pyrenderdoc.Replay().BlockInvoke(
+            _partial(_export_vsout_fbx, _tmp, mapper, _per_info, _per_errors,
+                     _vsin_data, _vsin_attrs)
+        )
+
+        if _per_errors:
+            info_list.append("batch: EID %d errors: %s" % (_eid, _per_errors[0][:80]))
+            continue
+        if not os.path.exists(_tmp):
+            info_list.append("batch: EID %d produced no file" % _eid)
+            continue
+
+        # Parse the temporary FBX to extract vertices and polygons
+        try:
+            with open(_tmp, "r") as _fh:
+                _txt = _fh.read()
+            import re as _re
+
+            def _extract(pattern, text):
+                m = _re.search(pattern, text, _re.DOTALL)
+                return m.group(1).strip() if m else ""
+
+            _verts_str = _extract(r"Vertices:\s*\*\d+\s*\{[^}]*a:\s*([^}]+)\}", _txt)
+            _polys_str = _extract(r"PolygonVertexIndex:\s*\*\d+\s*\{[^}]*a:\s*([^}]+)\}", _txt)
+
+            if not _verts_str or not _polys_str:
+                info_list.append("batch: EID %d empty geometry" % _eid)
+                continue
+
+            _verts = [float(v) for v in _verts_str.split(",") if v.strip()]
+            _polys = [int(v)   for v in _polys_str.split(",") if v.strip()]
+            _nv    = len(_verts) // 3
+
+            # Offset polygon indices
+            def _offset_idx(idx):
+                return (~(~idx + vert_offset)) if idx < 0 else idx + vert_offset
+
+            all_vertices.extend(_verts)
+            all_polygons.extend(_offset_idx(p) for p in _polys)
+            vert_offset += _nv
+
+            info_list.append("batch: EID %d → %d verts %d faces" % (
+                _eid, _nv, len(_polys) // 3))
+
+            # Accumulate UV, Normal etc. layer data (concatenate)
+            # UV
+            _uv_s = _extract(r'LayerElementUV:\s*0\s*\{.*?UV:\s*\*\d+\s*\{[^}]*a:\s*([^}]+)\}', _txt)
+            _ui_s = _extract(r'LayerElementUV:\s*0\s*\{.*?UVIndex:\s*\*\d+\s*\{[^}]*a:\s*([^}]+)\}', _txt)
+            if _uv_s and _ui_s:
+                _uvs_acc.append(_uv_s.strip())
+                _ui_vals = [str(int(v) + (len(_uvi_acc[0].split(",")) // 2
+                                          if _uvi_acc else 0))
+                            for v in _ui_s.split(",") if v.strip()]
+                # Simpler: just offset UV indices by current UV vertex count
+                _cur_uv_verts = sum(s.count(",") + 1 for s in _uvs_acc[:-1]) // 2
+                _ui_off = [str(int(v) + _cur_uv_verts) for v in _ui_s.split(",") if v.strip()]
+                _uvi_acc.append(",".join(_ui_off))
+
+            # Normal
+            _nrm_s = _extract(r'LayerElementNormal:\s*0\s*\{.*?Normals:\s*\*\d+\s*\{[^}]*a:\s*([^}]+)\}', _txt)
+            if _nrm_s: _nrms_acc.append(_nrm_s.strip())
+
+        except Exception as _pe:
+            info_list.append("batch: EID %d parse error: %s" % (_eid, str(_pe)[:60]))
+        finally:
+            try: os.remove(_tmp)
+            except OSError: pass
+
+    if not all_vertices:
+        err_list.append("Batch merge: no geometry collected from any event")
+        return
+
+    # Build combined UV layer if available
+    if _uvs_acc:
+        _all_uvs = ",".join(_uvs_acc)
+        _all_uvi = ",".join(_uvi_acc)
+        layer_uv = """
+            LayerElementUV: 0 {
+                Version: 101
+                Name: "map1"
+                MappingInformationType: "ByPolygonVertex"
+                ReferenceInformationType: "IndexToDirect"
+                UV: *%(n)s { a: %(v)s }
+                UVIndex: *%(in)s { a: %(i)s }
+            }""" % {"n":  _all_uvs.count(",") + 1, "v": _all_uvs,
+                    "in": _all_uvi.count(",") + 1, "i": _all_uvi}
+        layer_uv_ins = """
+            LayerElement: { Type: "LayerElementUV" TypedIndex: 0 }"""
+
+    # Build combined Normal layer if available
+    if _nrms_acc:
+        _all_nrms = ",".join(_nrms_acc)
+        layer_nrm = """
+            LayerElementNormal: 0 {
+                Version: 101
+                Name: ""
+                MappingInformationType: "ByPolygonVertex"
+                ReferenceInformationType: "Direct"
+                Normals: *%(n)s { a: %(v)s }
+            }""" % {"n": _all_nrms.count(",") + 1, "v": _all_nrms}
+        layer_nrm_ins = """
+            LayerElement: { Type: "LayerElementNormal" TypedIndex: 0 }"""
+
+    _mat_objs, _mat_cons = _build_fbx_material(os.path.dirname(save_path), save_name)
+
+    ARGS = {
+        "model_name":                save_name,
+        "vertices":                  ",".join(str(v) for v in all_vertices),
+        "vertices_num":              len(all_vertices),
+        "polygons":                  ",".join(str(p) for p in all_polygons),
+        "polygons_num":              len(all_polygons),
+        "LayerElementNormal":        layer_nrm,
+        "LayerElementNormalInsert":  layer_nrm_ins,
+        "LayerElementBiNormal":      layer_bn,
+        "LayerElementBiNormalInsert":layer_bn_ins,
+        "LayerElementTangent":       layer_tan,
+        "LayerElementTangentInsert": layer_tan_ins,
+        "LayerElementColor":         layer_col,
+        "LayerElementColorInsert":   layer_col_ins,
+        "LayerElementUV":            layer_uv,
+        "LayerElementUVInsert":      layer_uv_ins,
+        "LayerElementUV2":           layer_uv2,
+        "LayerElementUV2Insert":     layer_uv2_ins,
+        "FbxMaterialObjects":        _mat_objs,
+        "FbxMaterialConnections":    _mat_cons,
+        "FbxSkinObjects":            "",
+        "FbxSkinConnections":        "",
+    }
+    fbx = FBX_ASCII_TEMPLETE % ARGS
+    with open(save_path, "w") as _fh:
+        _fh.write(dedent(fbx).strip())
+    info_list.append("batch: merged %d events → %d total verts" % (
+        len(event_ids), len(all_vertices) // 3))
+
+
 # ---------------------------------------------------------------------------
 # Main export entry points
 # ---------------------------------------------------------------------------
@@ -1913,6 +2626,38 @@ def prepare_export(pyrenderdoc, data):
 
     fbx_info   = []
     fbx_errors = []
+
+    # ── Detect multi-draw-call batch mode ────────────────────────────────────
+    # If the user selected >1 event in the Event Browser, offer to merge them.
+    _selected_eids = []
+    try:
+        _sel_evts = pyrenderdoc.GetSelectedEvents()
+        if _sel_evts and len(_sel_evts) > 1:
+            _selected_eids = [int(e) for e in _sel_evts]
+    except Exception:
+        pass
+
+    if len(_selected_eids) > 1 and mesh_mode == "VS Output":
+        # Ask user before running batch
+        _batch_msg = ("检测到 %d 个选中的 draw call。\n合并导出为单个 FBX？\n\n"
+                      "EID: %s …" % (
+                          len(_selected_eids),
+                          ", ".join(str(e) for e in _selected_eids[:8])))
+        if manager.QuestionDialog(_batch_msg, "Batch Export"):
+            _do_batch_merge(save_path, dialog.mapper, _selected_eids,
+                            pyrenderdoc, fbx_info, fbx_errors, main_window)
+            if fbx_errors:
+                manager.ErrorDialog(
+                    "Batch export failed:\n" + "\n".join(fbx_errors), "Error")
+                return
+            tex_in, tex_out, shaders, shader_errs = _run_secondary_exports(
+                save_dir, dialog.mapper, pyrenderdoc)
+            if os.path.exists(save_path):
+                msg = _build_success_msg(save_path, dialog.mapper, fbx_info,
+                                         tex_in, tex_out, shaders, shader_errs)
+                os.startfile(save_dir)
+                manager.MessageDialog(msg, "Done!")
+            return
 
     def _add_input_aliases(data, attr_list):
         """Add _inputN ↔ ATTRIBUTE{N} aliases so both naming conventions work.

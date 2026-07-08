@@ -225,6 +225,18 @@ class QueryDialog(object):
             setattr(self, attr_name, chk)
             self._add_row(grid, r, label, chk); r += 1
 
+        # ── Bake World Space (VS Output only) ─────────────────────────────
+        self.bake_world_check = m.CreateCheckbox(self._on_bake_world)
+        m.SetWidgetChecked(self.bake_world_check,
+                           self.settings.value("BakeWorldSpace", "false") == "true")
+        self._add_row(grid, r, "Bake World Space", self.bake_world_check); r += 1
+
+        # ── Export Skin Weights ────────────────────────────────────────────
+        self.export_skin_check = m.CreateCheckbox(self._on_export_skin)
+        m.SetWidgetChecked(self.export_skin_check,
+                           self.settings.value("ExportSkin", "false") == "true")
+        self._add_row(grid, r, "Export Skin Weights", self.export_skin_check); r += 1
+
         # ── Attribute mapping fields ───────────────────────────────────
         self.button_dict = {}
         for key, label_text in self.edit_config:
@@ -374,6 +386,12 @@ class QueryDialog(object):
     def _on_vsout_color(self, ctx, widget, checked):
         self.settings.setValue("VSOutIncludeVSInColor",   "true" if checked else "false")
 
+    def _on_bake_world(self, ctx, widget, checked):
+        self.settings.setValue("BakeWorldSpace", "true" if checked else "false")
+
+    def _on_export_skin(self, ctx, widget, checked):
+        self.settings.setValue("ExportSkin", "true" if checked else "false")
+
     def _on_flip_u(self, ctx, widget, checked):
         self.settings.setValue("FlipU", "true" if checked else "false")
 
@@ -437,6 +455,8 @@ class QueryDialog(object):
         self.mapper["VSOUT_INCLUDE_VSIN_TANGENT"] = m.IsWidgetChecked(self.vsout_tangent_check)
         self.mapper["VSOUT_INCLUDE_VSIN_BINORMAL"]= m.IsWidgetChecked(self.vsout_binorm_check)
         self.mapper["VSOUT_INCLUDE_VSIN_COLOR"]   = m.IsWidgetChecked(self.vsout_color_check)
+        self.mapper["BAKE_WORLD_SPACE"]           = m.IsWidgetChecked(self.bake_world_check)
+        self.mapper["EXPORT_SKIN"]                = m.IsWidgetChecked(self.export_skin_check)
         self.mapper["FLIP_U"] = m.IsWidgetChecked(self.flip_u_check)
         self.mapper["FLIP_V"] = m.IsWidgetChecked(self.flip_v_check)
 
