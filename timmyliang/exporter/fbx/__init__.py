@@ -2398,9 +2398,16 @@ def _build_success_msg(save_path, mapper, fbx_info,
 
 
 # ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 # Batch EID helpers
 # ---------------------------------------------------------------------------
+
+def _cleanup_empty_dir(path):
+    """Remove *path* if it exists and contains no files (export produced nothing)."""
+    try:
+        if os.path.isdir(path) and not os.listdir(path):
+            os.rmdir(path)
+    except OSError:
+        pass
 
 def _parse_eids(text):
     """Parse "100,200-210,300" → sorted unique list [100,200,201,...,210,300]."""
@@ -2557,14 +2564,17 @@ def _batch_eid_export(eids, out_dir, mapper, pyrenderdoc, info_list):
             pyrenderdoc.Replay().BlockInvoke(_do_one)
         except Exception as _e:
             info_list.append("EID %d: BlockInvoke failed: %s" % (eid, _e))
+            _cleanup_empty_dir(eid_dir)
             continue
 
         if per_errors:
             info_list.append("EID %d: ERROR — %s" % (eid, per_errors[0][:80]))
+            _cleanup_empty_dir(eid_dir)
             continue
 
         if not _result[0]:
             info_list.append("EID %d: skipped (no data)" % eid)
+            _cleanup_empty_dir(eid_dir)
             continue
 
         # Export textures / shaders (each uses its own BlockInvoke internally)
