@@ -641,33 +641,74 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
         state   = controller.GetPipelineState()
         va_list = state.GetVertexInputs()
 
-        layout = {}   # name_variant -> (byteOffset, compCount, compByteWidth)
-        for slot_i, va in enumerate(va_list):
-            fmt_va = getattr(va, 'format', None)
-            off    = getattr(va, 'byteOffset',    0)
-            comp   = getattr(fmt_va, 'compCount',     4) if fmt_va else 4
-            width  = getattr(fmt_va, 'compByteWidth', 4) if fmt_va else 4
-            fc     = "f" if width == 4 else "d"
-            info   = (off, comp, width, fc)
+        # Sort by declared location so we can accumulate offsets in HW order
+        def _va_loc(iv):
+            return getattr(iv[1], 'location', iv[0])
+        va_sorted = sorted(enumerate(va_list), key=_va_loc)
 
-            # Location (Vulkan) or slot index (D3D)
-            loc = getattr(va, 'location', slot_i)
+        # Collect raw info per slot
+        slot_info = []   # (slot_i, loc, comp, width, reported_off)
+        for slot_i, va in va_sorted:
+            fmt_va  = getattr(va, 'format', None)
+            comp    = getattr(fmt_va, 'compCount',     4) if fmt_va else 4
+            width   = getattr(fmt_va, 'compByteWidth', 4) if fmt_va else 4
+            rep_off = int(getattr(va, 'byteOffset', 0) or 0)
+            loc     = getattr(va, 'location', slot_i)
+            slot_info.append((slot_i, loc, comp, width, rep_off))
 
-            # Semantic name (D3D11/D3D12)
+        # If ALL reported byteOffsets are 0, the API isn't providing them.
+        # Compute accumulated offsets instead.  Try two strategies and pick the
+        # one whose total matches the vertex stride.
+        any_nonzero = any(si[4] > 0 for si in slot_info)
+
+        if any_nonzero:
+            # Use API-reported offsets (most accurate)
+            computed_offsets = [si[4] for si in slot_info]
+            info_list.append("vsin_gpu offsets: api-reported")
+        else:
+            # Strategy A: natural (no padding)
+            nat_offs, nat_cum = [], 0
+            for _, _, comp, width, _ in slot_info:
+                nat_offs.append(nat_cum)
+                nat_cum += comp * width
+
+            # Strategy B: float4-aligned (each attribute rounded up to 4-comp boundary)
+            aln_offs, aln_cum = [], 0
+            for _, _, comp, width, _ in slot_info:
+                aln_offs.append(aln_cum)
+                raw = comp * width
+                aligned = ((raw + 4 * width - 1) // (4 * width)) * (4 * width)
+                aln_cum += aligned
+
+            if abs(aln_cum - stride) <= 4:
+                computed_offsets = aln_offs
+                info_list.append("vsin_gpu offsets: float4-aligned  total=%d stride=%d" % (aln_cum, stride))
+            elif abs(nat_cum - stride) <= 4:
+                computed_offsets = nat_offs
+                info_list.append("vsin_gpu offsets: natural  total=%d stride=%d" % (nat_cum, stride))
+            else:
+                # Neither fits; use natural and warn
+                computed_offsets = nat_offs
+                info_list.append("vsin_gpu offsets: UNKNOWN  nat=%d aln=%d stride=%d" % (nat_cum, aln_cum, stride))
+
+        layout = {}   # name_variant -> (byteOffset, compCount, compByteWidth, fmtChar)
+        for idx, (slot_i, loc, comp, width, _) in enumerate(slot_info):
+            off  = computed_offsets[idx]
+            fc   = "f" if width == 4 else "d"
+            info = (off, comp, width, fc)
+
+            # Collect name aliases
+            va    = va_sorted[idx][1]
             sname = (getattr(va, 'semanticName', '') or '').strip()
             sidx  = getattr(va, 'semanticIndex', 0)
-
-            # Generate ALL plausible name aliases for this slot
             candidates = set()
             if sname:
-                candidates.add(sname + str(sidx))       # e.g. ATTRIBUTE5, TEXCOORD0
+                candidates.add(sname + str(sidx))
                 if sidx == 0:
-                    candidates.add(sname)                # TEXCOORD (no suffix)
+                    candidates.add(sname)
                 candidates.add(sname.upper() + str(sidx))
-            # Vulkan _inputN  — by declared location AND by slot order
             candidates.add("_input%d" % loc)
             candidates.add("_input%d" % slot_i)
-            # Unreal ATTRIBUTEN aliases for Vulkan locations
             candidates.add("ATTRIBUTE%d" % loc)
             candidates.add("ATTRIBUTE%d" % slot_i)
 
@@ -675,6 +716,11 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
                 if name and name not in layout:
                     layout[name] = info
 
+        # Show slot details so user can identify UV / Color names
+        slot_detail = []
+        for idx, (slot_i, loc, comp, width, _) in enumerate(slot_info):
+            slot_detail.append("loc%d:off%d:comp%d" % (loc, computed_offsets[idx], comp))
+        info_list.append("vsin_gpu slots=[%s]" % " ".join(slot_detail))
         info_list.append("vsin_gpu layout keys=[%s]" %
                          ",".join(sorted(layout.keys())[:14]))
 
@@ -1041,6 +1087,8 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
             info_list.append("uv2=%s (%d unique)" % (UV2, len(uv2_verts)))
 
         # ── Normal (ByPolygonVertex Direct, via vertex-index lookup) ─────────
+        info_list.append("nrm_check: vsout_normal=%s NORMAL=%r has=%s" % (
+            vsout_normal, NORMAL, bool(vsin_raw.get(NORMAL, None))))
         if vsout_normal and NORMAL and vsin_raw.get(NORMAL):
             nrm_verts = vsin_raw[NORMAL]
             nrms = []
