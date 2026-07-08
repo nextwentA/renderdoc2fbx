@@ -59,6 +59,10 @@ FBX_ASCII_TEMPLETE = """
                 }
             }
         }
+
+        ObjectType: "Deformer" {
+            Count: 1
+        }
     }
 
     ; Object properties
@@ -1958,31 +1962,43 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
         _skin_cons = ""
         if mapper.get("EXPORT_SKIN", False):
             try:
-                _pipe  = controller.GetPipelineState()
-                _vb0_d = None
-                _vb0_s = 0
+                # Read VS Input vertex buffer — bone data lives here, NOT in
+                # VS Output.  Use the same GetPostVSData(VSIn) path as
+                # _read_vsin_attrs_from_gpu so we don't rely on GetVertexBuffers().
+                _fmt_in  = controller.GetPostVSData(0, 0, rd.MeshDataStage.VSIn)
+                _vb_res  = _fmt_in.vertexResourceId
+                _vb_str  = _fmt_in.vertexByteStride
+                _vb_off  = getattr(_fmt_in, 'vertexByteOffset', 0)
+                _vb_data = bytes(controller.GetBufferData(_vb_res, _vb_off, 0))
+                _nv_total = len(vertices) // 3
+
+                # Estimate nat_cum from the known VS Input attribute layout.
+                # Walk GetVertexInputs() and sum component sizes to find where
+                # the "named" attributes end and extra data (bones) begins.
+                _nat = 0
                 try:
-                    _vbs   = _pipe.GetVertexBuffers()
-                    if _vbs:
-                        _vb0   = _vbs[0]
-                        _vb0_d = bytes(controller.GetBufferData(
-                            _vb0.resourceId, _vb0.byteOffset, 0))
-                        _vb0_s = _vb0.byteStride
+                    _va_list = controller.GetPipelineState().GetVertexInputs()
+                    for _va in _va_list:
+                        _bpc = getattr(_va.format, 'compByteWidth', 4)
+                        _nc  = getattr(_va.format, 'compCount',     4)
+                        _nat += _bpc * _nc
                 except Exception:
-                    pass
-                if _vb0_d and _vb0_s:
-                    _nv_total = len(vertices) // 3
-                    # nat_cum from mapper or estimate from attribute layout
-                    _nat = 28   # default fallback
-                    _bw, _bi = _scan_bone_data(_vb0_d, _vb0_s, _nv_total, _nat, info_list)
-                    if _bw:
-                        _skin_objs, _skin_cons = _build_fbx_skin(_bw, _bi, _nv_total)
-                        info_list.append("skin: %d bones, %d verts" % (
-                            max(max(idxs) for idxs in _bi) + 1, _nv_total))
-                    else:
-                        info_list.append("skin: no bone data found in VB0")
+                    _nat = 20   # Position(12) + Tangent(4) + Normal(4) fallback
+
+                info_list.append("skin: vb_stride=%d nat=%d nv=%d" % (
+                    _vb_str, _nat, _nv_total))
+
+                _bw, _bi = _scan_bone_data(_vb_data, _vb_str,
+                                           _nv_total, _nat, info_list)
+                if _bw:
+                    _skin_objs, _skin_cons = _build_fbx_skin(_bw, _bi, _nv_total)
+                    _nb = max(max(idxs) for idxs in _bi) + 1
+                    info_list.append("skin: OK — %d bones, %d verts" % (_nb, _nv_total))
+                else:
+                    info_list.append("skin: bone data not found (check stride/nat)")
             except Exception as _se:
-                info_list.append("skin error: %s" % str(_se)[:80])
+                import traceback as _tb
+                info_list.append("skin ERROR: %s" % _tb.format_exc().split('\n')[-2])
 
         _mat_objs, _mat_cons = _build_fbx_material(
             os.path.dirname(save_path), save_name)
