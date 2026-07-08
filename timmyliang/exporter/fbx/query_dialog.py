@@ -159,6 +159,22 @@ class QueryDialog(object):
             sub_gl.setColumnStretch(ci, 1)   # equal column widths
         self._gl.addWidget(sub, outer_row, 0, 1, 2)   # span col 0+1
 
+    def _add_check_row(self, _grid, row, label, chk_widget):
+        """Single checkbox spanning both columns with inline label text.
+
+        Consistent with _add_n_per_row style: label text is set directly on
+        the checkbox, and the widget spans col 0 → col 1 (full dialog width).
+        """
+        from PySide2 import QtWidgets
+        self.mqt.SetWidgetText(chk_widget, label)
+        sub = QtWidgets.QWidget()
+        sub_gl = QtWidgets.QGridLayout(sub)
+        sub_gl.setContentsMargins(0, 0, 0, 0)
+        sub_gl.setSpacing(0)
+        sub_gl.addWidget(chk_widget, 0, 0, 1, 1)
+        sub_gl.setColumnStretch(0, 1)
+        self._gl.addWidget(sub, row, 0, 1, 2)
+
     def _section(self, _grid, row, title):
         """Add a section-title row spanning both columns."""
         self._gl.addWidget(self._label("-- %s --" % title), row, 0, 1, 2)
@@ -334,12 +350,12 @@ class QueryDialog(object):
         self.default_name_check = m.CreateCheckbox(self._on_default_name)
         use_default = self.settings.value("TexDefaultName", "true") == "true"
         m.SetWidgetChecked(self.default_name_check, use_default)
-        self._add_row(grid, r, "Default Name", self.default_name_check); r += 1
+        self._add_check_row(grid, r, "Default Name", self.default_name_check); r += 1
 
         self.tex_fbx_prefix_check = m.CreateCheckbox(self._on_tex_fbx_prefix)
         tex_fbx_prefix = self.settings.value("TexFbxPrefix", "true") == "true"
         m.SetWidgetChecked(self.tex_fbx_prefix_check, tex_fbx_prefix)
-        self._add_row(grid, r, "FBX Name Prefix", self.tex_fbx_prefix_check); r += 1
+        self._add_check_row(grid, r, "FBX Name Prefix", self.tex_fbx_prefix_check); r += 1
 
         self.tex_prefix_edit = m.CreateTextBox(True, partial(self._on_attr_changed, "TexPrefix"))
         self.tex_infix_edit  = m.CreateTextBox(True, partial(self._on_attr_changed, "TexInfix"))
@@ -361,7 +377,7 @@ class QueryDialog(object):
         self.shader_check = m.CreateCheckbox(self._on_shader_check)
         m.SetWidgetChecked(self.shader_check,
             self.settings.value("ExportShaders", "true") == "true")
-        self._add_row(grid, r, "Export", self.shader_check); r += 1
+        self._add_check_row(grid, r, "Export Shaders", self.shader_check); r += 1
 
         self.shader_fmt_combo = self._combo(
             ["Binary", "Disasm (txt)"],
@@ -372,7 +388,7 @@ class QueryDialog(object):
         self.shader_fbx_prefix_check = m.CreateCheckbox(self._on_shader_fbx_prefix)
         shader_fbx_prefix = self.settings.value("ShaderFbxPrefix", "true") == "true"
         m.SetWidgetChecked(self.shader_fbx_prefix_check, shader_fbx_prefix)
-        self._add_row(grid, r, "FBX Name Prefix", self.shader_fbx_prefix_check); r += 1
+        self._add_check_row(grid, r, "FBX Name Prefix", self.shader_fbx_prefix_check); r += 1
 
         self.stage_checks = {}
         for row_keys in [self.STAGE_KEYS[:3], self.STAGE_KEYS[3:]]:
