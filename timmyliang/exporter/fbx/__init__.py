@@ -584,6 +584,50 @@ def export_obj(save_path, mapper, data, attr_list, controller):
 # VS Output export (clip-space reconstruction)
 # ---------------------------------------------------------------------------
 
+def _read_index_buffer(fmt, controller):
+    """Read the index buffer referenced by *fmt* and return a list of ints.
+
+    Returns ``None`` when:
+    - no index buffer is attached (non-indexed draw), or
+    - an error occurs while reading.
+
+    Returned indices are normalized to 0-based (minimum index is subtracted).
+    Supports uint16 (stride=2) and uint32 (stride=4) index formats.
+    """
+    if fmt.indexResourceId == rd.ResourceId.Null():
+        return None
+    try:
+        raw        = bytes(controller.GetBufferData(fmt.indexResourceId, 0, 0))
+        byte_off   = fmt.indexByteOffset
+        idx_stride = fmt.indexByteStride
+        count      = fmt.numIndices
+
+        if idx_stride == 2:
+            pack_char = "H"   # uint16
+        elif idx_stride == 4:
+            pack_char = "I"   # uint32
+        else:
+            return None
+
+        indices = []
+        for i in range(count):
+            base = byte_off + i * idx_stride
+            if base + idx_stride > len(raw):
+                break
+            indices.append(struct.unpack_from("<" + pack_char, raw, base)[0])
+
+        if not indices:
+            return None
+
+        # Normalize: subtract base-vertex so indices start at 0
+        min_idx = min(indices)
+        if min_idx != 0:
+            indices = [v - min_idx for v in indices]
+        return indices
+    except Exception:
+        return None
+
+
 def _export_vsout_fbx(save_path, mapper, info_list, err_list, controller):
     """
     Export VS Output mesh with correct view-space positions.
@@ -679,11 +723,17 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list, controller):
         info_list.append("aspect=%.4f m00=%.4f m11=%.4f actual=%d" % (
             aspect, m00, m11, actual))
 
+        # Build vertex positions.
+        # IMPORTANT: write a placeholder (0,0,0) instead of skipping degenerate
+        # vertices (w≈0) so that every clip_pos[i] maps to vertex index i.
+        # Skipping with `continue` would shift subsequent indices and corrupt faces.
         vertices = []
         for cp in clip_pos:
             cx, cy, cz = cp[0], cp[1], cp[2]
             cw_val = cp[3] if len(cp) >= 4 else 1.0
             if abs(cw_val) < 1e-6:
+                # Degenerate clip vertex — emit a placeholder to keep index alignment
+                vertices.extend([0.0, 0.0, 0.0])
                 continue
             ndc_z = cz / cw_val
             if far > 1e30:
@@ -702,8 +752,16 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list, controller):
                 [round(x, 3) for x in vertices[3:6]],
                 [round(x, 3) for x in vertices[6:9]]))
 
-        indices  = list(range(len(clip_pos)))
-        polygons = [~idx if i % 3 == 2 else idx for i, idx in enumerate(indices)]
+        # Read the real index buffer that connects vertices into triangles.
+        # Sequential fallback is used only for non-indexed (vertex-array) draws.
+        idx_list = _read_index_buffer(fmt_out, controller)
+        has_ib   = idx_list is not None
+        if not has_ib:
+            idx_list = list(range(len(clip_pos)))
+        info_list.append("index_buf=%s  faces=%d" % (
+            "yes" if has_ib else "no (sequential)", len(idx_list) // 3))
+
+        polygons = [~idx if i % 3 == 2 else idx for i, idx in enumerate(idx_list)]
 
         save_name = os.path.basename(os.path.splitext(save_path)[0])
         ARGS = {
