@@ -818,6 +818,19 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
         layer_bn      = "";  layer_bn_ins  = ""
         layer_col     = "";  layer_col_ins = ""
 
+        # ── Diagnostic: always report what VS Input data we have ──────────────
+        _d = []
+        if vs_in_data is None:
+            _d.append("vs_in=None (table 'vsinData'/'inTable' NOT found)")
+        else:
+            _tmp_idx  = vs_in_data.get("IDX", [])
+            _tmp_att  = vs_in_attr_list or set()
+            _d.append("rows=%d" % len(_tmp_idx))
+            _d.append("attrs=[%s]" % ",".join(sorted(_tmp_att)[:8]))
+            _d.append("UV=%r->%s" % (UV,     "OK" if UV     in _tmp_att else "MISSING"))
+            _d.append("NRM=%r->%s" % (NORMAL, "OK" if NORMAL in _tmp_att else "MISSING"))
+        info_list.append("vsin: " + "  ".join(_d))
+
         if vs_in_data and idx_list:
             vsin_idxs    = vs_in_data.get("IDX", [])
             vsin_attrs   = vs_in_attr_list or set()
@@ -1034,6 +1047,16 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
                     }
                 """
                 info_list.append("color=%s" % COLOR)
+
+        # ── Diagnostic: which FBX layers were actually written ────────────────
+        info_list.append("layers: UV=%s UV2=%s Nrm=%s Tan=%s BN=%s Col=%s" % (
+            "Y" if layer_uv  else "N",
+            "Y" if layer_uv2 else "N",
+            "Y" if layer_nrm else "N",
+            "Y" if layer_tan else "N",
+            "Y" if layer_bn  else "N",
+            "Y" if layer_col else "N",
+        ))
 
         ARGS = {
             "model_name":                save_name,
