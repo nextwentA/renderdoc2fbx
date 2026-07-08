@@ -117,9 +117,9 @@ class QueryDialog(object):
     # ------------------------------------------------------------------
 
     def _label(self, text):
-        w = self.mqt.CreateLabel()
-        self.mqt.SetWidgetText(w, text)
-        return w
+        """Create a QLabel using PySide2 directly (works in PySide2 layouts)."""
+        from PySide2 import QtWidgets
+        return QtWidgets.QLabel(text)
 
     def _combo(self, options, saved, callback):
         m = self.mqt
@@ -128,36 +128,40 @@ class QueryDialog(object):
         m.SelectComboOption(c, saved if saved in options else options[0])
         return c
 
-    def _add_row(self, grid, row, label_text, widget):
-        self.mqt.AddGridWidget(grid, row, 0, self._label(label_text), 1, 1)
-        self.mqt.AddGridWidget(grid, row, 1, widget, 1, 1)
+    def _add_row(self, _grid, row, label_text, widget):
+        """Add a label+widget row to the PySide2 grid layout."""
+        self._gl.addWidget(self._label(label_text), row, 0, 1, 1)
+        self._gl.addWidget(widget,                  row, 1, 1, 1)
 
     def _add_two_per_row(self, grid, row, items_2col):
         """Compatibility wrapper — calls _add_n_per_row with n=2."""
         self._add_n_per_row(grid, row, items_2col, n=2)
 
-    def _add_n_per_row(self, grid, outer_row, items, n=2):
-        """Place n checkboxes side-by-side, left-aligned, width capped at
-        the Engine combo box (col 0 → col 1 right edge, colspan=2).
+    def _add_n_per_row(self, _grid, outer_row, items, n=2):
+        """Place n checkboxes side-by-side in a PySide2 sub-widget.
 
-        Each item: (attr_name, setting_key, label, cb_name, default).
-        Label text is set directly on the checkbox so no extra column is used.
-        n equal-width columns are distributed by Qt inside the sub-grid.
+        The sub-widget spans both columns (col 0-1), so it left-aligns at
+        the dialog edge and never exceeds the Engine combo box right boundary.
+        Each of the n checkboxes gets an equal share of that width.
         """
+        from PySide2 import QtWidgets
         m = self.mqt
-        sub = m.CreateGridContainer()
+        sub = QtWidgets.QWidget()
+        sub_gl = QtWidgets.QGridLayout(sub)
+        sub_gl.setContentsMargins(0, 0, 0, 0)
+        sub_gl.setSpacing(4)
         for ci, (attr_name, setting_key, label, cb_name, default) in enumerate(items[:n]):
             chk = m.CreateCheckbox(getattr(self, cb_name))
             m.SetWidgetChecked(chk, self.settings.value(setting_key, default) == "true")
-            m.SetWidgetText(chk, label)   # text on the checkbox itself
+            m.SetWidgetText(chk, label)   # label text on the checkbox itself
             setattr(self, attr_name, chk)
-            m.AddGridWidget(sub, 0, ci, chk, 1, 1)
-        # colspan=2 → starts at col 0 (left edge) and ends at col 1 right edge
-        # This matches "Engine" label+combo total width exactly.
-        m.AddGridWidget(grid, outer_row, 0, sub, 1, 2)
+            sub_gl.addWidget(chk, 0, ci, 1, 1)
+            sub_gl.setColumnStretch(ci, 1)   # equal column widths
+        self._gl.addWidget(sub, outer_row, 0, 1, 2)   # span col 0+1
 
-    def _section(self, grid, row, title):
-        self.mqt.AddGridWidget(grid, row, 0, self._label("-- %s --" % title), 1, 2)
+    def _section(self, _grid, row, title):
+        """Add a section-title row spanning both columns."""
+        self._gl.addWidget(self._label("-- %s --" % title), row, 0, 1, 2)
 
     # ------------------------------------------------------------------
     # Engine template preset
@@ -190,33 +194,52 @@ class QueryDialog(object):
 
     def init_ui(self):
         from PySide2 import QtWidgets, QtCore
-        m           = self.mqt
-        self.widget = m.CreateToplevelWidget(self.title, None)
-        grid        = m.CreateGridContainer()
+        m = self.mqt
 
-        # Wrap the grid in a vertical scroll area so the dialog stays
-        # compact even as new features are added.
+        # ── Pure PySide2 outer shell: QDialog → QScrollArea → QWidget ─────
+        dlg = QtWidgets.QDialog()
+        dlg.setWindowTitle(self.title)
+        dlg.resize(440, 580)
+
+        outer = QtWidgets.QVBoxLayout(dlg)
+        outer.setContentsMargins(4, 4, 4, 4)
+        outer.setSpacing(4)
+
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
-        scroll.setMinimumHeight(480)
-        scroll.setWidget(grid)   # MiniQtHelper grid IS a PySide2 QWidget
-        m.AddWidget(self.widget, scroll)
+        outer.addWidget(scroll, 1)           # stretch=1, takes all spare space
 
-        r = 0   # row counter
+        content = QtWidgets.QWidget()
+        self._gl = QtWidgets.QGridLayout(content)
+        self._gl.setContentsMargins(6, 6, 6, 6)
+        self._gl.setSpacing(4)
+        self._gl.setColumnStretch(1, 1)      # widget column stretches
+        scroll.setWidget(content)
+
+        # OK / Cancel row (outside scroll area — always visible)
+        btn_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        def _on_ok():
+            self._accept(None, None, None)
+            dlg.accept()
+        btn_box.accepted.connect(_on_ok)
+        btn_box.rejected.connect(dlg.reject)
+        outer.addWidget(btn_box)
+
+        self.widget = dlg
+        grid = None          # kept as dummy parameter for helper methods
+        r = 0
 
         # ── Available Attributes (info only) ──────────────────────────────
         if self.available_attrs:
             attrs_str = ", ".join(self.available_attrs)
-            # Truncate if too long for a single label
             if len(attrs_str) > 80:
                 attrs_str = attrs_str[:77] + "..."
             self._section(grid, r, "Mesh Export"); r += 1
-            self.mqt.AddGridWidget(
-                grid, r, 0, self._label("Found attrs:"), 1, 1)
-            self.mqt.AddGridWidget(
-                grid, r, 1, self._label(attrs_str), 1, 1)
+            self._gl.addWidget(self._label("Found attrs:"), r, 0, 1, 1)
+            self._gl.addWidget(self._label(attrs_str),      r, 1, 1, 1)
             r += 1
         else:
             self._section(grid, r, "Mesh Export"); r += 1
@@ -283,7 +306,7 @@ class QueryDialog(object):
         if self.available_attrs:
             detect_btn = m.CreateButton(self._apply_auto_detect)
             m.SetWidgetText(detect_btn, "Auto-detect Attributes")
-            m.AddGridWidget(grid, r, 0, detect_btn, 1, 2); r += 1
+            self._gl.addWidget(detect_btn, r, 0, 1, 2); r += 1
 
         # ── UV Flip ────────────────────────────────────────────────────
         self._section(grid, r, "UV Options"); r += 1
@@ -353,28 +376,24 @@ class QueryDialog(object):
 
         self.stage_checks = {}
         for row_keys in [self.STAGE_KEYS[:3], self.STAGE_KEYS[3:]]:
-            row_widget = m.CreateHorizontalContainer()
+            from PySide2 import QtWidgets as _QW
+            row_widget = _QW.QWidget()
+            row_layout = _QW.QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(4)
             for sk in row_keys:
-                lbl = self._label(sk)
                 chk = m.CreateCheckbox(partial(self._on_stage_check, sk))
+                m.SetWidgetText(chk, sk)
                 checked = self.settings.value(
                     "ShaderStage_%s" % sk,
                     "true" if self.STAGE_DEFAULTS[sk] else "false") == "true"
                 m.SetWidgetChecked(chk, checked)
-                m.AddWidget(row_widget, lbl)
-                m.AddWidget(row_widget, chk)
+                row_layout.addWidget(chk)
                 self.stage_checks[sk] = chk
-            m.AddGridWidget(grid, r, 0, row_widget, 1, 2); r += 1
+            row_layout.addStretch()
+            self._gl.addWidget(row_widget, r, 0, 1, 2); r += 1
 
-        # ── OK / Cancel ───────────────────────────────────────────────
-        btn_row    = m.CreateHorizontalContainer()
-        cancel_btn = m.CreateButton(lambda *a: m.CloseCurrentDialog(False))
-        ok_btn     = m.CreateButton(self._accept)
-        m.SetWidgetText(cancel_btn, "Cancel")
-        m.SetWidgetText(ok_btn,     "OK")
-        m.AddWidget(btn_row, cancel_btn)
-        m.AddWidget(btn_row, ok_btn)
-        m.AddGridWidget(grid, r, 0, btn_row, 1, 2)
+        return self.widget
 
         return self.widget
 
@@ -504,5 +523,4 @@ class QueryDialog(object):
         self.mapper["SHADER_STAGES"]          = {
             k: m.IsWidgetChecked(v) for k, v in self.stage_checks.items()
         }
-
-        m.CloseCurrentDialog(True)
+        # Dialog is closed by QDialogButtonBox's OK button in init_ui.
