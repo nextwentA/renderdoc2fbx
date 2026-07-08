@@ -584,6 +584,126 @@ def export_obj(save_path, mapper, data, attr_list, controller):
 # VS Output export (clip-space reconstruction)
 # ---------------------------------------------------------------------------
 
+def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
+    """Read VS Input vertex attributes directly from the GPU vertex buffer.
+
+    This bypasses the Qt Mesh-Viewer table entirely, which is unreliable in
+    VS Output view mode because RenderDoc repopulates the same table widget
+    with VS Output attribute data (named ``_input0``…``_inputN`` for Vulkan /
+    DX12 DXIL shaders) instead of VS Input data.
+
+    Attribute-name mapping
+    ----------------------
+    The pipeline vertex-input layout may use:
+    - D3D11/D3D12 semantic style: ``TEXCOORD0``, ``NORMAL``, ``ATTRIBUTE5`` …
+    - Vulkan location style:      ``_input0``, ``_input1``, ``_input4`` …
+
+    For each layout slot we generate ALL plausible aliases so that a mapper
+    configured with ``UV = "ATTRIBUTE5"`` still matches the slot that lives at
+    Vulkan location 5 (or slot index 5) regardless of what RenderDoc calls it.
+
+    Returns
+    -------
+    attr_data : dict
+        ``{attr_name: [[comp0, comp1, …], …]}`` — one list entry per **unique
+        vertex** in the VS Input vertex buffer.
+    vsin_nidxs : list[int]
+        Normalized 0-based vertex index for every face corner (draw index),
+        built from the VS Input index buffer.  Directly usable as UV-index
+        array for FBX ``IndexToDirect``.
+    """
+    attr_data  = {}
+    vsin_nidxs = []
+
+    try:
+        # ── VS Input vertex buffer ────────────────────────────────────────────
+        fmt_in = controller.GetPostVSData(0, 0, rd.MeshDataStage.VSIn)
+        if fmt_in.numIndices == 0:
+            info_list.append("vsin_gpu: 0 indices – no VS Input data")
+            return attr_data, vsin_nidxs
+
+        raw     = bytes(controller.GetBufferData(fmt_in.vertexResourceId, 0, 0))
+        vbo_off = fmt_in.vertexByteOffset
+        vb_data = raw[vbo_off:] if vbo_off < len(raw) else raw
+        stride  = fmt_in.vertexByteStride
+        nv      = len(vb_data) // stride    # unique vertex count
+
+        info_list.append("vsin_gpu: %d unique verts  stride=%d bytes" % (nv, stride))
+
+        # ── VS Input index buffer → face-corner vertex index list ─────────────
+        idx_raw  = _read_index_buffer(fmt_in, controller)
+        if idx_raw is None:
+            idx_raw = list(range(nv))
+        min_idx   = min(idx_raw) if idx_raw else 0
+        vsin_nidxs = [v - min_idx for v in idx_raw]
+
+        # ── Vertex input layout → byte-offset map ─────────────────────────────
+        state   = controller.GetPipelineState()
+        va_list = state.GetVertexInputs()
+
+        layout = {}   # name_variant -> (byteOffset, compCount, compByteWidth)
+        for slot_i, va in enumerate(va_list):
+            fmt_va = getattr(va, 'format', None)
+            off    = getattr(va, 'byteOffset',    0)
+            comp   = getattr(fmt_va, 'compCount',     4) if fmt_va else 4
+            width  = getattr(fmt_va, 'compByteWidth', 4) if fmt_va else 4
+            fc     = "f" if width == 4 else "d"
+            info   = (off, comp, width, fc)
+
+            # Location (Vulkan) or slot index (D3D)
+            loc = getattr(va, 'location', slot_i)
+
+            # Semantic name (D3D11/D3D12)
+            sname = (getattr(va, 'semanticName', '') or '').strip()
+            sidx  = getattr(va, 'semanticIndex', 0)
+
+            # Generate ALL plausible name aliases for this slot
+            candidates = set()
+            if sname:
+                candidates.add(sname + str(sidx))       # e.g. ATTRIBUTE5, TEXCOORD0
+                if sidx == 0:
+                    candidates.add(sname)                # TEXCOORD (no suffix)
+                candidates.add(sname.upper() + str(sidx))
+            # Vulkan _inputN  — by declared location AND by slot order
+            candidates.add("_input%d" % loc)
+            candidates.add("_input%d" % slot_i)
+            # Unreal ATTRIBUTEN aliases for Vulkan locations
+            candidates.add("ATTRIBUTE%d" % loc)
+            candidates.add("ATTRIBUTE%d" % slot_i)
+
+            for name in candidates:
+                if name and name not in layout:
+                    layout[name] = info
+
+        info_list.append("vsin_gpu layout keys=[%s]" %
+                         ",".join(sorted(layout.keys())[:14]))
+
+        # ── Read each requested attribute ──────────────────────────────────────
+        for key in ("POSITION", "NORMAL", "TANGENT", "BINORMAL", "COLOR", "UV", "UV2"):
+            attr_name = mapper.get(key, "")
+            if not attr_name:
+                continue
+            if attr_name not in layout:
+                info_list.append("  %s=%r -> MISSING (not in layout)" % (key, attr_name))
+                continue
+            off, comp, width, fc = layout[attr_name]
+            verts = []
+            for vi in range(nv):
+                base = vi * stride + off
+                if base + comp * width > len(vb_data):
+                    break
+                comps = list(struct.unpack_from("<%d%s" % (comp, fc), vb_data, base))
+                verts.append(comps)
+            attr_data[attr_name] = verts
+            info_list.append("  %s=%r -> OK  %d verts  comp=%d  byteOff=%d" % (
+                key, attr_name, len(verts), comp, off))
+
+    except Exception:
+        import traceback
+        info_list.append("vsin_gpu ERROR: " + traceback.format_exc().split('\n')[-2])
+
+    return attr_data, vsin_nidxs
+
 def _read_index_buffer(fmt, controller):
     """Read the index buffer referenced by *fmt* and return a list of ints.
 
@@ -821,232 +941,220 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
         # ── Diagnostic: always report what VS Input data we have ──────────────
         _d = []
         if vs_in_data is None:
-            _d.append("vs_in=None (table 'vsinData'/'inTable' NOT found)")
+            _d.append("qt_table=None")
         else:
             _tmp_idx  = vs_in_data.get("IDX", [])
             _tmp_att  = vs_in_attr_list or set()
-            _d.append("rows=%d" % len(_tmp_idx))
-            _d.append("attrs=[%s]" % ",".join(sorted(_tmp_att)[:8]))
-            _d.append("UV=%r->%s" % (UV,     "OK" if UV     in _tmp_att else "MISSING"))
-            _d.append("NRM=%r->%s" % (NORMAL, "OK" if NORMAL in _tmp_att else "MISSING"))
-        info_list.append("vsin: " + "  ".join(_d))
+            _d.append("qt_rows=%d attrs=[%s]" % (
+                len(_tmp_idx), ",".join(sorted(_tmp_att)[:6])))
+        info_list.append("vsin_qt: " + "  ".join(_d))
 
-        if vs_in_data and idx_list:
-            vsin_idxs    = vs_in_data.get("IDX", [])
-            vsin_attrs   = vs_in_attr_list or set()
-            n_fc         = len(idx_list)          # face corners
-            min_vsin_idx = min(int(v) for v in vsin_idxs) if vsin_idxs else 0
+        # ── Read VS Input attributes directly from GPU vertex buffer ──────────
+        # This is reliable regardless of which tab (VS In / VS Out) the user
+        # has selected in the Mesh Viewer, because the Qt table repopulates with
+        # VS Output data in VS Output view mode (Vulkan: _inputN names).
+        vsin_raw, vsin_nidxs_gpu = _read_vsin_attrs_from_gpu(
+            mapper, info_list, controller)
 
-            # Unique-vertex lookup (0-based keys) — used only for UV / UV2
-            vsin_vdata = defaultdict(dict)
-            for row, vidx in enumerate(vsin_idxs):
-                nvidx = int(vidx) - min_vsin_idx
-                for attr in (UV, UV2):
-                    if attr and attr in vsin_attrs and nvidx not in vsin_vdata[attr]:
-                        vsin_vdata[attr][nvidx] = vs_in_data[attr][row]
+        # vsin_nidxs: normalized 0-based VS Input vertex index per face corner
+        # Used as UV IndexToDirect index array — must come from the VS Input IB,
+        # NOT from idx_list (the VS Output expanded sequential indices).
+        vsin_nidxs = vsin_nidxs_gpu[:n_fc] if vsin_nidxs_gpu else []
+        if len(vsin_nidxs) < n_fc:
+            vsin_nidxs.extend([0] * (n_fc - len(vsin_nidxs)))
 
-            # ── Normalized VS Input vertex indices per face corner ─────────────
-            # CRITICAL: use VS Input IDX, NOT idx_list from VS Output IB.
-            #
-            # RenderDoc stores VS Output in *expanded* form (no index buffer):
-            # one vertex slot per draw index, so idx_list falls back to
-            # [0, 1, 2, 3, 4, 5, ...].  But vsin_vdata[UV] is keyed by
-            # *unique* vertex index (e.g. only 4 keys for a mesh with 4 unique
-            # verts drawn 6 times).  Using sequential idx_list would address UV
-            # slots that don't exist and produce completely wrong UV mapping.
-            #
-            # VS Input IDX column contains the original vertex index for every
-            # draw index (the same value the hardware uses to fetch from the VBO).
-            # Normalizing it (subtract minimum) gives the correct 0-based key
-            # into vsin_vdata[UV] for each face corner.
-            _n = min(n_fc, len(vsin_idxs))
-            vsin_nidxs = [int(vsin_idxs[i]) - min_vsin_idx for i in range(_n)]
-            if len(vsin_nidxs) < n_fc:          # safety padding
-                vsin_nidxs.extend([0] * (n_fc - len(vsin_nidxs)))
+        def _xform3(vals):
+            if ENGINE != "unreal":
+                return list(vals[:3])
+            x, y, z = vals[:3]
+            return [-x, z, -y]
 
-            def _xform3(vals):
-                if ENGINE != "unreal":
-                    return list(vals[:3])
-                x, y, z = vals[:3]
-                return [-x, z, -y]
+        def _safe_vert(attr_verts, vi, default):
+            """Return vertex data at normalized index vi, or default."""
+            return attr_verts[vi] if vi < len(attr_verts) else default
 
-            def _get_row(attr, i, default):
-                """Safe per-polygon-vertex access into VS Input table data."""
-                col = vs_in_data.get(attr)
-                return col[i] if col and i < len(col) else default
+        # ── UV0 (IndexToDirect, per-unique-vertex) ───────────────────────────
+        if vsout_uv and UV and vsin_raw.get(UV):
+            uv_verts = vsin_raw[UV]
+            uvs = [
+                str((1.0 - v if flip_u else v) if dim == 0
+                    else (1.0 - v if flip_v else v))
+                for vals in uv_verts
+                for dim, v in enumerate(vals[:2])
+            ]
+            uvi = ",".join(str(i) for i in vsin_nidxs)
+            layer_uv = """
+                LayerElementUV: 0 {
+                    Version: 101
+                    Name: "map1"
+                    MappingInformationType: "ByPolygonVertex"
+                    ReferenceInformationType: "IndexToDirect"
+                    UV: *%(uvs_num)s {
+                        a: %(uvs)s
+                    }
+                    UVIndex: *%(uvi_num)s {
+                        a: %(uvi)s
+                    }
+                }
+            """ % {"uvs": ",".join(uvs), "uvs_num": len(uvs),
+                   "uvi": uvi,            "uvi_num": n_fc}
+            layer_uv_ins = """
+                LayerElement: {
+                    Type: "LayerElementUV"
+                    TypedIndex: 0
+                }
+            """
+            info_list.append("uv=%s (%d unique)" % (UV, len(uv_verts)))
 
-            # ── UV0 (IndexToDirect, per-unique-vertex) ───────────────────────
-            if vsout_uv and UV and vsin_vdata.get(UV):
-                uvs = [
-                    str((1.0 - v if flip_u else v) if dim == 0
-                        else (1.0 - v if flip_v else v))
-                    for _, vals in sorted(vsin_vdata[UV].items())
-                    for dim, v in enumerate(vals[:2])
-                ]
-                uvi = ",".join(str(i) for i in vsin_nidxs)  # VS Input vertex idx, NOT idx_list
-                layer_uv = """
-                    LayerElementUV: 0 {
-                        Version: 101
-                        Name: "map1"
-                        MappingInformationType: "ByPolygonVertex"
-                        ReferenceInformationType: "IndexToDirect"
-                        UV: *%(uvs_num)s {
-                            a: %(uvs)s
-                        }
-                        UVIndex: *%(uvi_num)s {
-                            a: %(uvi)s
-                        }
+        # ── UV1 (IndexToDirect, per-unique-vertex) ───────────────────────────
+        if vsout_uv2 and UV2 and vsin_raw.get(UV2):
+            uv2_verts = vsin_raw[UV2]
+            uvs2 = [
+                str((1.0 - v if flip_u else v) if dim == 0
+                    else (1.0 - v if flip_v else v))
+                for vals in uv2_verts
+                for dim, v in enumerate(vals[:2])
+            ]
+            uvi2 = ",".join(str(i) for i in vsin_nidxs)
+            layer_uv2 = """
+                LayerElementUV: 1 {
+                    Version: 101
+                    Name: "map2"
+                    MappingInformationType: "ByPolygonVertex"
+                    ReferenceInformationType: "IndexToDirect"
+                    UV: *%(uvs_num)s {
+                        a: %(uvs)s
                     }
-                """ % {"uvs": ",".join(uvs), "uvs_num": len(uvs),
-                       "uvi": uvi,            "uvi_num": n_fc}
-                layer_uv_ins = """
-                    LayerElement: {
-                        Type: "LayerElementUV"
-                        TypedIndex: 0
+                    UVIndex: *%(uvi_num)s {
+                        a: %(uvi)s
                     }
-                """
-                info_list.append("uv=%s (%d unique)" % (UV, len(uvs) // 2))
+                }
+            """ % {"uvs": ",".join(uvs2), "uvs_num": len(uvs2),
+                   "uvi": uvi2,            "uvi_num": n_fc}
+            layer_uv2_ins = """
+                LayerElement: {
+                    Type: "LayerElementUV"
+                    TypedIndex: 1
+                }
+            """
+            info_list.append("uv2=%s (%d unique)" % (UV2, len(uv2_verts)))
 
-            # ── UV1 (IndexToDirect, per-unique-vertex) ───────────────────────
-            if vsout_uv2 and UV2 and vsin_vdata.get(UV2):
-                uvs2 = [
-                    str((1.0 - v if flip_u else v) if dim == 0
-                        else (1.0 - v if flip_v else v))
-                    for _, vals in sorted(vsin_vdata[UV2].items())
-                    for dim, v in enumerate(vals[:2])
-                ]
-                uvi2 = ",".join(str(i) for i in vsin_nidxs)  # VS Input vertex idx, NOT idx_list
-                layer_uv2 = """
-                    LayerElementUV: 1 {
-                        Version: 101
-                        Name: "map2"
-                        MappingInformationType: "ByPolygonVertex"
-                        ReferenceInformationType: "IndexToDirect"
-                        UV: *%(uvs_num)s {
-                            a: %(uvs)s
-                        }
-                        UVIndex: *%(uvi_num)s {
-                            a: %(uvi)s
-                        }
+        # ── Normal (ByPolygonVertex Direct, via vertex-index lookup) ─────────
+        if vsout_normal and NORMAL and vsin_raw.get(NORMAL):
+            nrm_verts = vsin_raw[NORMAL]
+            nrms = []
+            for fc_i in range(n_fc):
+                vi = vsin_nidxs[fc_i]
+                n  = _xform3(_safe_vert(nrm_verts, vi, [0.0, 0.0, 1.0]))
+                nrms.extend(str(x) for x in n)
+            layer_nrm = """
+                LayerElementNormal: 0 {
+                    Version: 101
+                    Name: ""
+                    MappingInformationType: "ByPolygonVertex"
+                    ReferenceInformationType: "Direct"
+                    Normals: *%(n)s {
+                        a: %(v)s
                     }
-                """ % {"uvs": ",".join(uvs2), "uvs_num": len(uvs2),
-                       "uvi": uvi2,            "uvi_num": n_fc}
-                layer_uv2_ins = """
-                    LayerElement: {
-                        Type: "LayerElementUV"
-                        TypedIndex: 1
-                    }
-                """
-                info_list.append("uv2=%s (%d unique)" % (UV2, len(uvs2) // 2))
+                }
+            """ % {"n": len(nrms), "v": ",".join(nrms)}
+            layer_nrm_ins = """
+                LayerElement: {
+                    Type: "LayerElementNormal"
+                    TypedIndex: 0
+                }
+            """
+            info_list.append("normal=%s (%d corners)" % (NORMAL, n_fc))
 
-            # ── Normal (ByPolygonVertex Direct) ──────────────────────────────
-            if vsout_normal and NORMAL and NORMAL in vsin_attrs:
-                nrms = []
-                for i in range(n_fc):
-                    n = _xform3(_get_row(NORMAL, i, [0.0, 0.0, 1.0]))
-                    nrms.extend(str(x) for x in n)
-                layer_nrm = """
-                    LayerElementNormal: 0 {
-                        Version: 101
-                        Name: ""
-                        MappingInformationType: "ByPolygonVertex"
-                        ReferenceInformationType: "Direct"
-                        Normals: *%(n)s {
-                            a: %(v)s
-                        }
+        # ── Tangent (ByPolygonVertex Direct) ─────────────────────────────────
+        if vsout_tangent and TANGENT and vsin_raw.get(TANGENT):
+            tan_verts = vsin_raw[TANGENT]
+            tans = []
+            for fc_i in range(n_fc):
+                vi = vsin_nidxs[fc_i]
+                t  = _xform3(_safe_vert(tan_verts, vi, [1.0, 0.0, 0.0]))
+                tans.extend(str(x) for x in t)
+            layer_tan = """
+                LayerElementTangent: 0 {
+                    Version: 101
+                    Name: "map1"
+                    MappingInformationType: "ByPolygonVertex"
+                    ReferenceInformationType: "Direct"
+                    Tangents: *%(n)s {
+                        a: %(v)s
                     }
-                """ % {"n": len(nrms), "v": ",".join(nrms)}
-                layer_nrm_ins = """
-                    LayerElement: {
-                        Type: "LayerElementNormal"
-                        TypedIndex: 0
-                    }
-                """
-                info_list.append("normal=%s (%d corners)" % (NORMAL, n_fc))
+                }
+            """ % {"n": len(tans), "v": ",".join(tans)}
+            layer_tan_ins = """
+                LayerElement: {
+                    Type: "LayerElementTangent"
+                    TypedIndex: 0
+                }
+            """
+            info_list.append("tangent=%s" % TANGENT)
 
-            # ── Tangent (ByPolygonVertex Direct) ─────────────────────────────
-            if vsout_tangent and TANGENT and TANGENT in vsin_attrs:
-                tans = []
-                for i in range(n_fc):
-                    t = _xform3(_get_row(TANGENT, i, [1.0, 0.0, 0.0]))
-                    tans.extend(str(x) for x in t)
-                layer_tan = """
-                    LayerElementTangent: 0 {
-                        Version: 101
-                        Name: "map1"
-                        MappingInformationType: "ByPolygonVertex"
-                        ReferenceInformationType: "Direct"
-                        Tangents: *%(n)s {
-                            a: %(v)s
-                        }
+        # ── BiNormal (ByPolygonVertex Direct) ────────────────────────────────
+        if vsout_binorm and BINORM and vsin_raw.get(BINORM):
+            bn_verts = vsin_raw[BINORM]
+            bns = []
+            for fc_i in range(n_fc):
+                vi = vsin_nidxs[fc_i]
+                b  = _xform3(_safe_vert(bn_verts, vi, [0.0, 1.0, 0.0]))
+                bns.extend(str(-float(x)) for x in b)
+            layer_bn = """
+                LayerElementBinormal: 0 {
+                    Version: 101
+                    Name: "map1"
+                    MappingInformationType: "ByPolygonVertex"
+                    ReferenceInformationType: "Direct"
+                    Binormals: *%(n)s {
+                        a: %(v)s
                     }
-                """ % {"n": len(tans), "v": ",".join(tans)}
-                layer_tan_ins = """
-                    LayerElement: {
-                        Type: "LayerElementTangent"
-                        TypedIndex: 0
+                    BinormalsW: *%(wn)s {
+                        a: %(w)s
                     }
-                """
-                info_list.append("tangent=%s" % TANGENT)
+                }
+            """ % {"n":  len(bns), "v": ",".join(bns),
+                   "wn": n_fc,     "w": ",".join(["1"] * n_fc)}
+            layer_bn_ins = """
+                LayerElement: {
+                    Type: "LayerElementBinormal"
+                    TypedIndex: 0
+                }
+            """
+            info_list.append("binormal=%s" % BINORM)
 
-            # ── BiNormal (ByPolygonVertex Direct) ────────────────────────────
-            if vsout_binorm and BINORM and BINORM in vsin_attrs:
-                bns = []
-                for i in range(n_fc):
-                    b = _xform3(_get_row(BINORM, i, [0.0, 1.0, 0.0]))
-                    bns.extend(str(-float(x)) for x in b)   # negate, same as export_fbx
-                layer_bn = """
-                    LayerElementBinormal: 0 {
-                        Version: 101
-                        Name: "map1"
-                        MappingInformationType: "ByPolygonVertex"
-                        ReferenceInformationType: "Direct"
-                        Binormals: *%(n)s {
-                            a: %(v)s
-                        }
-                        BinormalsW: *%(wn)s {
-                            a: %(w)s
-                        }
+        # ── Color (ByPolygonVertex IndexToDirect, sequential) ─────────────────
+        if vsout_color and COLOR and vsin_raw.get(COLOR):
+            col_verts = vsin_raw[COLOR]
+            cols = []
+            for fc_i in range(n_fc):
+                vi = vsin_nidxs[fc_i]
+                c  = _safe_vert(col_verts, vi, [1.0, 1.0, 1.0, 1.0])
+                cols.extend(str(x) for x in c[:4])
+            col_idx = ",".join(str(i) for i in range(n_fc))
+            layer_col = """
+                LayerElementColor: 0 {
+                    Version: 101
+                    Name: "colorSet1"
+                    MappingInformationType: "ByPolygonVertex"
+                    ReferenceInformationType: "IndexToDirect"
+                    Colors: *%(n)s {
+                        a: %(v)s
                     }
-                """ % {"n":  len(bns), "v": ",".join(bns),
-                       "wn": n_fc,     "w": ",".join(["1"] * n_fc)}
-                layer_bn_ins = """
-                    LayerElement: {
-                        Type: "LayerElementBinormal"
-                        TypedIndex: 0
+                    ColorIndex: *%(in_num)s {
+                        a: %(idx)s
                     }
-                """
-                info_list.append("binormal=%s" % BINORM)
-
-            # ── Color (ByPolygonVertex IndexToDirect, sequential index) ───────
-            if vsout_color and COLOR and COLOR in vsin_attrs:
-                cols = []
-                for i in range(n_fc):
-                    c = _get_row(COLOR, i, [1.0, 1.0, 1.0, 1.0])
-                    cols.extend(str(x) for x in c[:4])
-                col_idx = ",".join(str(i) for i in range(n_fc))
-                layer_col = """
-                    LayerElementColor: 0 {
-                        Version: 101
-                        Name: "colorSet1"
-                        MappingInformationType: "ByPolygonVertex"
-                        ReferenceInformationType: "IndexToDirect"
-                        Colors: *%(n)s {
-                            a: %(v)s
-                        }
-                        ColorIndex: *%(in_num)s {
-                            a: %(idx)s
-                        }
-                    }
-                """ % {"n": len(cols), "v": ",".join(cols),
-                       "in_num": n_fc,  "idx": col_idx}
-                layer_col_ins = """
-                    LayerElement: {
-                        Type: "LayerElementColor"
-                        TypedIndex: 0
-                    }
-                """
-                info_list.append("color=%s" % COLOR)
+                }
+            """ % {"n": len(cols), "v": ",".join(cols),
+                   "in_num": n_fc,  "idx": col_idx}
+            layer_col_ins = """
+                LayerElement: {
+                    Type: "LayerElementColor"
+                    TypedIndex: 0
+                }
+            """
+            info_list.append("color=%s" % COLOR)
 
         # ── Diagnostic: which FBX layers were actually written ────────────────
         info_list.append("layers: UV=%s UV2=%s Nrm=%s Tan=%s BN=%s Col=%s" % (
