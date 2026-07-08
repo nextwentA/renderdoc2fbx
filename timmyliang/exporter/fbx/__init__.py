@@ -1146,6 +1146,45 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
         import traceback
         info_list.append("vsin_gpu ERROR: " + traceback.format_exc().split('\n')[-2])
 
+    # ── Supplemental: read ALL layout slots by _inputN / ATTRIBUTE{N} names ──
+    # _read_vsin_attrs_from_gpu only reads mapper-specified attributes by their
+    # exact name (e.g. "POSITION").  For Vulkan captures the vertex input layout
+    # only contains location-based names (_input0, ATTRIBUTE0, …) — semantic
+    # names like "POSITION" or "VERTEX" don't appear.  Without this pass,
+    # Unity/Godot presets find nothing to export in batch mode even though the
+    # single-export path works (because _collect_mesh_data + _add_input_aliases
+    # covers the mismatch).
+    #
+    # By reading every slot here, _alias_vsin_data can later build POSITION from
+    # _input0, TEXCOORD0 from _input3, etc. — matching single-export behaviour.
+    try:
+        _seen_off_comp = set()   # deduplicate slots that share the same (offset, comp)
+        for _sname, (_soff, _scomp, _swidth, _sfc) in layout.items():
+            # Only process the canonical _inputN / ATTRIBUTE{N} names once
+            if not (_sname.startswith("_input") or _sname.startswith("ATTRIBUTE")):
+                continue
+            if _sname in attr_data:
+                continue                     # already populated by main read loop
+            _dedup_key = (_soff, _scomp)
+            if _dedup_key in _seen_off_comp:
+                continue
+            _seen_off_comp.add(_dedup_key)
+
+            _sverts = []
+            for _vi in range(nv):
+                _base = _vi * stride + _soff
+                if _base + _scomp * _swidth > len(vb_data):
+                    break
+                _raw = list(struct.unpack_from(
+                    "<%d%s" % (_scomp, _sfc), vb_data, _base))
+                if   _sfc == "b": _raw = [v / 127.0 for v in _raw]
+                elif _sfc == "B": _raw = [v / 255.0 for v in _raw]
+                _sverts.append(_raw)
+            if _sverts:
+                attr_data[_sname] = _sverts
+    except Exception:
+        pass   # supplemental read is best-effort; don't mask the main result
+
     return attr_data, vsin_nidxs
 
 def _read_index_buffer(fmt, controller):
