@@ -637,6 +637,36 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
         min_idx   = min(idx_raw) if idx_raw else 0
         vsin_nidxs = [v - min_idx for v in idx_raw]
 
+        # ── Collect ALL bound vertex buffers (Vulkan/DX12 can have many) ──────
+        # Different attributes (position vs UV) often live in separate VB bindings
+        # (each with its own stride).  We enumerate them all so the UV scan can
+        # search beyond the primary binding that fmt_in describes.
+        all_vb = []   # list of (raw_bytes_after_offset, stride_per_vertex)
+        all_vb.append((vb_data, stride))   # binding 0 = primary (fmt_in)
+        try:
+            state0  = controller.GetPipelineState()
+            vb_list = state0.GetVertexBuffers()
+            for bi, vb_b in enumerate(vb_list):
+                rid  = getattr(vb_b, 'resourceId', None)
+                boff = int(getattr(vb_b, 'byteOffset', 0) or 0)
+                bstr = int(getattr(vb_b, 'byteStride', 0) or 0)
+                if not rid or rid == rd.ResourceId.Null() or bstr <= 0:
+                    continue
+                if rid == fmt_in.vertexResourceId:
+                    continue  # already in all_vb[0]
+                try:
+                    raw_bi = bytes(controller.GetBufferData(rid, 0, 0))
+                    data_bi = raw_bi[boff:] if boff < len(raw_bi) else raw_bi
+                    nv_bi   = len(data_bi) // bstr
+                    if nv_bi >= nv // 2:   # plausible vertex count
+                        all_vb.append((data_bi, bstr))
+                        info_list.append("vsin_gpu: extra VB binding %d stride=%d verts=%d" % (
+                            bi, bstr, nv_bi))
+                except Exception:
+                    pass
+        except Exception as e:
+            info_list.append("vsin_gpu: GetVertexBuffers() skipped: %s" % str(e))
+
         # ── Vertex input layout → byte-offset map ─────────────────────────────
         state   = controller.GetPipelineState()
         va_list = state.GetVertexInputs()
@@ -780,55 +810,76 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
                 _max_v  = max(_sample) if _sample else 0.0
 
                 if _max_v < 0.01:
-                    # Current read gives no real UV data — scan vertex stride
-                    info_list.append("  %s: values near-zero (max=%.2e), scanning stride…" % (key, _max_v))
+                    # Current read gives no real UV data.
+                    # Scan EVERY bound vertex buffer at EVERY 2-byte-aligned offset,
+                    # trying both float16 and float32.
+                    # Rejection heuristics (to avoid bone-weights / normals):
+                    #   • Normals (SNORM): u+v ≈ const per vertex → low std-dev of sums
+                    #   • Bone-weights: u+v ≈ 1.0 → mean(abs(u+v-1)) < 0.05
+                    #   • UV: values cover 2-D area, sums NOT pinned to 1
+                    info_list.append("  %s: near-zero (max=%.2e), scanning all VBs…" % (key, _max_v))
                     _best_score, _best_verts, _best_desc = -1, None, ""
 
-                    for _scan_off in range(0, stride - 1, 2):
-                        for _sfmt, _sbpc in (("e", 2), ("f", 4)):  # half first, float32 second
-                            _need = comp * _sbpc
-                            if _scan_off + _need > stride:
-                                continue
-                            _sv = []
-                            for _vi in range(min(30, nv)):
-                                _b = _vi * stride + _scan_off
-                                if _b + _need > len(vb_data):
-                                    break
-                                _sv.append(list(struct.unpack_from(
-                                    "<%d%s" % (comp, _sfmt), vb_data, _b)))
-                            if len(_sv) < 5:
-                                continue
-                            _vals = [v for _e in _sv for v in _e]
-                            _in_range = sum(1 for v in _vals if 0.0 <= abs(v) <= 10.0)
-                            _nonzero  = sum(1 for v in _vals if abs(v) > 0.001)
-                            _vmax     = max(abs(v) for v in _vals)
-                            # Good UV: mostly in [0,10], significant variation, not all same
-                            _unique   = len(set(round(v, 3) for v in _vals))
-                            _score    = _in_range + _nonzero * 2 + min(_unique, 20)
-                            if (0.001 <= _vmax <= 10.0 and
-                                    _nonzero >= len(_vals) * 0.3 and
-                                    _in_range >= len(_vals) * 0.8 and
-                                    _score > _best_score):
-                                _best_score = _score
-                                _best_desc  = "off=%d fmt=%s" % (_scan_off, _sfmt)
-                                # Store parameters, not full data (read all later)
-                                _best_verts = (_scan_off, _sfmt, _sbpc)
+                    for _vbi, (_vbd, _vbstr) in enumerate(all_vb):
+                        _nvb = len(_vbd) // _vbstr if _vbstr > 0 else 0
+                        for _scan_off in range(0, _vbstr - 1, 2):
+                            for _sfmt, _sbpc in (("e", 2), ("f", 4)):
+                                _need = comp * _sbpc
+                                if _scan_off + _need > _vbstr:
+                                    continue
+                                _sv = []
+                                for _vi in range(min(50, _nvb)):
+                                    _b = _vi * _vbstr + _scan_off
+                                    if _b + _need > len(_vbd):
+                                        break
+                                    _sv.append(list(struct.unpack_from(
+                                        "<%d%s" % (comp, _sfmt), _vbd, _b)))
+                                if len(_sv) < 5:
+                                    continue
+                                _vals = [v for _e in _sv for v in _e]
+                                _in_range = sum(1 for v in _vals if 0.001 <= abs(v) <= 10.0)
+                                _nonzero  = sum(1 for v in _vals if abs(v) > 0.001)
+                                _vmax     = max(abs(v) for v in _vals)
+                                _unique   = len(set(round(v, 3) for v in _vals))
+                                # Reject if u+v sums are pinned near 1.0 (bone weights)
+                                _sums     = [_sv[i][0] + _sv[i][1] for i in range(len(_sv))]
+                                _sum_near1 = sum(1 for s in _sums if abs(s - 1.0) < 0.05)
+                                if _sum_near1 > len(_sums) * 0.7:
+                                    continue   # bone-weight pattern
+                                # Require genuine 2D spread (not all on a line)
+                                _us = [_sv[i][0] for i in range(len(_sv))]
+                                _vs = [_sv[i][1] for i in range(len(_sv))]
+                                _urange = max(_us) - min(_us) if _us else 0
+                                _vrange = max(_vs) - min(_vs) if _vs else 0
+                                if _urange < 0.05 or _vrange < 0.05:
+                                    continue   # degenerate (collapsed axis)
+                                _score = _in_range + _nonzero * 2 + min(_unique, 20)
+                                if (0.001 <= _vmax <= 10.0 and
+                                        _nonzero >= len(_vals) * 0.3 and
+                                        _in_range >= len(_vals) * 0.7 and
+                                        _score > _best_score):
+                                    _best_score = _score
+                                    _best_desc  = "vb%d off=%d fmt=%s str=%d" % (
+                                        _vbi, _scan_off, _sfmt, _vbstr)
+                                    _best_verts = (_vbd, _vbstr, _nvb, _scan_off, _sfmt, _sbpc)
 
                     if _best_verts is not None:
-                        _scan_off, _sfmt, _sbpc = _best_verts
+                        _vbd, _vbstr, _nvb, _scan_off, _sfmt, _sbpc = _best_verts
                         _new_verts = []
-                        for _vi in range(nv):
-                            _b = _vi * stride + _scan_off
-                            if _b + comp * _sbpc > len(vb_data):
+                        for _vi in range(_nvb):
+                            _b = _vi * _vbstr + _scan_off
+                            if _b + comp * _sbpc > len(_vbd):
                                 break
                             _new_verts.append(list(struct.unpack_from(
-                                "<%d%s" % (comp, _sfmt), vb_data, _b)))
+                                "<%d%s" % (comp, _sfmt), _vbd, _b)))
                         if _new_verts:
                             verts = _new_verts
-                            info_list.append("  %s: scan found UV at %s (score=%d)" % (
-                                key, _best_desc, _best_score))
+                            info_list.append("  %s: scan→ %s (score=%d  uR=%.2f vR=%.2f)" % (
+                                key, _best_desc, _best_score,
+                                max(v[0] for v in _new_verts[:20]) - min(v[0] for v in _new_verts[:20]),
+                                max(v[1] for v in _new_verts[:20]) - min(v[1] for v in _new_verts[:20])))
                     else:
-                        info_list.append("  %s: scan found nothing plausible in stride" % key)
+                        info_list.append("  %s: scan found nothing in any VB" % key)
 
             attr_data[attr_name] = verts
             info_list.append("  %s=%r -> OK  %d verts  comp=%d  byteOff=%d  fmt=%s" % (
