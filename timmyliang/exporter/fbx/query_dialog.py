@@ -128,6 +128,10 @@ class QueryDialog(object):
         m.SelectComboOption(c, saved if saved in options else options[0])
         return c
 
+    def _add_row(self, grid, row, label_text, widget):
+        self.mqt.AddGridWidget(grid, row, 0, self._label(label_text), 1, 1)
+        self.mqt.AddGridWidget(grid, row, 1, widget, 1, 1)
+
     def _add_two_per_row(self, grid, row, items_2col):
         """Place two labeled-checkbox items side-by-side in one row.
 
@@ -145,8 +149,6 @@ class QueryDialog(object):
             setattr(self, attr_name, chk)
             m.AddGridWidget(grid, row, ci * 2,     self._label(label), 1, 1)
             m.AddGridWidget(grid, row, ci * 2 + 1, chk,                1, 1)
-
-
 
     def _section(self, grid, row, title):
         self.mqt.AddGridWidget(grid, row, 0, self._label("-- %s --" % title), 1, 2)
