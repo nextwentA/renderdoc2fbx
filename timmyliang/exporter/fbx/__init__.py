@@ -1856,6 +1856,41 @@ def prepare_export(pyrenderdoc, data):
     fbx_info   = []
     fbx_errors = []
 
+    def _add_input_aliases(data, attr_list):
+        """Add _inputN ↔ ATTRIBUTE{N} aliases so both naming conventions work.
+
+        Vulkan-based RenderDoc captures use location-based names (_input0,
+        _input1, …) in the Qt Mesh Viewer table.  Unreal Engine presets
+        reference them as ATTRIBUTE0, ATTRIBUTE1, etc.  This helper creates
+        bidirectional aliases so VS-Input export finds data regardless of
+        which convention the mapper uses.
+        """
+        if data is None:
+            return data, attr_list
+        added = {}
+        for k in list(data.keys()):
+            if k.startswith("_input"):
+                try:
+                    n     = int(k[len("_input"):])
+                    alias = "ATTRIBUTE%d" % n
+                    if alias not in data:
+                        added[alias] = data[k]
+                except ValueError:
+                    pass
+            elif k.startswith("ATTRIBUTE"):
+                try:
+                    n     = int(k[len("ATTRIBUTE"):])
+                    alias = "_input%d" % n
+                    if alias not in data:
+                        added[alias] = data[k]
+                except ValueError:
+                    pass
+        if added:
+            data.update(added)
+            if attr_list is not None:
+                attr_list = set(attr_list) | set(added.keys())
+        return data, attr_list
+
     if mesh_mode == "VS Input":
         data, attr_list = _collect_mesh_data(main_window)
         if data is None:
@@ -1864,6 +1899,7 @@ def prepare_export(pyrenderdoc, data):
                 "Error",
             )
             return
+        data, attr_list = _add_input_aliases(data, attr_list)
         print("elapsed time unpack: %s" % (time.time() - current))
         _run_mesh_export(save_path, dialog.mapper, data, attr_list,
                          pyrenderdoc, fbx_info, fbx_errors)
@@ -1948,6 +1984,7 @@ def prepare_quick_export(pyrenderdoc, data):
         ))
         if need_vsin:
             vs_in_data, vs_in_attr_list = _collect_mesh_data(main_window)
+            vs_in_data, vs_in_attr_list = _add_input_aliases(vs_in_data, vs_in_attr_list)
         else:
             vs_in_data, vs_in_attr_list = None, None
         _run_mesh_export(save_path, mapper, vs_in_data, vs_in_attr_list,
