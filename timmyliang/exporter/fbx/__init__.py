@@ -1207,6 +1207,43 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
         if len(vsin_nidxs) < n_fc:
             vsin_nidxs.extend([0] * (n_fc - len(vsin_nidxs)))
 
+        # ── Override UV with Qt-table data (RenderDoc decoded the format) ────
+        # The Qt mesh-viewer table has per-draw-corner float UV already decoded
+        # from whatever GPU format (float16, float32 …).  This is more reliable
+        # than our own GPU byte-offset + format guessing in _read_vsin_attrs_from_gpu.
+        # The "IDX" column gives raw VS-Input vertex indices matching the draw IB.
+        _qt_uv_key = None
+        for _qk in ([UV] if UV else []) + ["_input4", "_input3", "_input2"]:
+            if vs_in_data and vs_in_data.get(_qk):
+                # Quick sanity: must be a list of 2-element sequences (UV pairs)
+                _sample_qt = vs_in_data[_qk]
+                if _sample_qt and hasattr(_sample_qt[0], '__len__') and len(_sample_qt[0]) >= 2:
+                    _qt_uv_key = _qk
+                    break
+
+        if vsout_uv and _qt_uv_key:
+            try:
+                _qt_uv_corn = vs_in_data[_qt_uv_key]   # [u,v] per draw corner
+                _qt_idx_raw = vs_in_data.get("IDX", [])
+                if _qt_idx_raw and len(_qt_uv_corn) >= n_fc:
+                    _qi = [int(float(x)) for x in _qt_idx_raw[:n_fc]]
+                    _min_qi = min(_qi) if _qi else 0
+                    _uv_map = {}
+                    for _fc in range(n_fc):
+                        _ni = _qi[_fc] - _min_qi
+                        if _ni not in _uv_map:
+                            _uv_map[_ni] = list(_qt_uv_corn[_fc][:2])
+                    if _uv_map:
+                        _max_ni = max(_uv_map.keys())
+                        vsin_raw[UV] = [_uv_map.get(_i, [0.0, 0.0])
+                                        for _i in range(_max_ni + 1)]
+                        # Rebuild corner→vertex index from Qt IDX (consistency)
+                        vsin_nidxs = [_qi[fc] - _min_qi for fc in range(n_fc)]
+                        info_list.append("UV: Qt-table override (%s) %d unique/%d corners" % (
+                            _qt_uv_key, len(_uv_map), n_fc))
+            except Exception as _e_qt:
+                info_list.append("UV: Qt-table override failed: %s" % str(_e_qt))
+
         def _xform3(vals):
             if ENGINE != "unreal":
                 return list(vals[:3])
