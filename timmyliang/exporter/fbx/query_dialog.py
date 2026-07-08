@@ -1,4 +1,14 @@
 # -*- coding: utf-8 -*-
+"""
+Export Options dialog for the RenderDoc FBX/OBJ Mesh Exporter.
+
+Improvements over the original:
+  * Available vertex attributes are displayed and auto-detect fills the fields.
+  * Format selector: FBX (ASCII) or Wavefront OBJ.
+  * Per-axis UV flip controls (U and V independently).
+  * Godot engine template preset added.
+"""
+
 from __future__ import division
 from __future__ import print_function
 from __future__ import absolute_import
@@ -11,6 +21,63 @@ import os
 import tempfile
 from functools import partial
 from PySide2 import QtCore
+
+
+# ---------------------------------------------------------------------------
+# Auto-detect heuristics
+# ---------------------------------------------------------------------------
+
+# Map from our internal key to candidate attribute names, ordered by priority.
+# The first candidate found in the available attributes list wins.
+_AUTO_DETECT_MAP = {
+    "POSITION": ["POSITION", "SV_Position", "ATTRIBUTE0", "ATTR0", "in_POSITION0"],
+    "NORMAL":   ["NORMAL",   "ATTRIBUTE2",  "ATTR2",      "in_NORMAL0"],
+    "TANGENT":  ["TANGENT",  "ATTRIBUTE1",  "ATTR1",      "in_TANGENT0"],
+    "BINORMAL": ["BINORMAL", "ATTRIBUTE3",  "ATTR3",      "in_BINORMAL0"],
+    "COLOR":    ["COLOR",    "COLOR0",      "ATTRIBUTE13", "ATTR13", "in_COLOR0"],
+    "UV":       ["TEXCOORD0","TEXCOORD",    "UV0",         "UV",
+                 "ATTRIBUTE5", "ATTR5",     "in_TEXCOORD0"],
+    "UV2":      ["TEXCOORD1","UV1",         "UV2",
+                 "ATTRIBUTE6", "ATTR6",     "in_TEXCOORD1"],
+}
+
+
+def _detect_attrs(available_attrs):
+    """Return {key: detected_name} for every key that matches something in *available_attrs*."""
+    attr_set = set(available_attrs)
+    result   = {}
+    for key, candidates in _AUTO_DETECT_MAP.items():
+        for cand in candidates:
+            if cand in attr_set:
+                result[key] = cand
+                break
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Engine templates
+# ---------------------------------------------------------------------------
+
+_ENGINE_TEMPLATES = {
+    "unity": {
+        "POSITION": "POSITION",  "TANGENT": "TANGENT",
+        "BINORMAL": "",          "NORMAL":  "NORMAL",
+        "COLOR":    "COLOR",     "UV":      "TEXCOORD0",
+        "UV2":      "TEXCOORD1",
+    },
+    "unreal": {
+        "POSITION": "ATTRIBUTE0", "TANGENT": "ATTRIBUTE1",
+        "BINORMAL": "",           "NORMAL":  "ATTRIBUTE2",
+        "COLOR":    "ATTRIBUTE13","UV":      "ATTRIBUTE5",
+        "UV2":      "ATTRIBUTE6",
+    },
+    "godot": {
+        "POSITION": "VERTEX",   "TANGENT": "TANGENT",
+        "BINORMAL": "BINORMAL", "NORMAL":  "NORMAL",
+        "COLOR":    "COLOR",    "UV":      "UV",
+        "UV2":      "UV2",
+    },
+}
 
 
 class QueryDialog(object):
@@ -27,25 +94,28 @@ class QueryDialog(object):
         ("UV2",      "UV2     "),
     ]
 
-    ENGINE_OPTIONS = ["unity", "unreal"]
+    ENGINE_OPTIONS = ["unity", "unreal", "godot"]
     MODE_OPTIONS   = ["VS Input", "VS Output"]
+    FORMAT_OPTIONS = ["FBX", "OBJ"]
     FMT_OPTIONS    = ["PNG", "DDS", "TGA", "BMP", "HDR", "EXR"]
     STAGE_KEYS     = ["VS", "PS", "GS", "HS", "DS", "CS"]
     STAGE_DEFAULTS = {"VS": True, "PS": True, "GS": False,
                       "HS": False, "DS": False, "CS": False}
 
-    def __init__(self, mqt):
-        self.mqt = mqt
-        self.button_dict  = {}
-        self.stage_checks = {}
-        self.mapper       = {}
+    def __init__(self, mqt, available_attrs=None):
+        self.mqt             = mqt
+        self.button_dict     = {}
+        self.stage_checks    = {}
+        self.mapper          = {}
+        self.available_attrs = available_attrs or []
         name = "RenderDoc_%s.ini" % self.__class__.__name__
         path = os.path.join(tempfile.gettempdir(), name)
         self.settings = QtCore.QSettings(path, QtCore.QSettings.IniFormat)
 
     # ------------------------------------------------------------------
-    # helpers
+    # Low-level widget helpers
     # ------------------------------------------------------------------
+
     def _label(self, text):
         w = self.mqt.CreateLabel()
         self.mqt.SetWidgetText(w, text)
@@ -59,33 +129,18 @@ class QueryDialog(object):
         return c
 
     def _add_row(self, grid, row, label_text, widget):
-        """Add a label+widget pair as one grid row."""
         self.mqt.AddGridWidget(grid, row, 0, self._label(label_text), 1, 1)
         self.mqt.AddGridWidget(grid, row, 1, widget, 1, 1)
 
     def _section(self, grid, row, title):
-        """Add a section header spanning both columns."""
         self.mqt.AddGridWidget(grid, row, 0, self._label("-- %s --" % title), 1, 2)
 
     # ------------------------------------------------------------------
-    # engine template preset
+    # Engine template preset
     # ------------------------------------------------------------------
+
     def _apply_template(self, text):
-        config = {}
-        if text == "unity":
-            config = {
-                "POSITION": "POSITION",  "TANGENT": "TANGENT",
-                "BINORMAL": "",          "NORMAL":  "NORMAL",
-                "COLOR":    "COLOR",     "UV":      "TEXCOORD0",
-                "UV2":      "TEXCOORD1",
-            }
-        elif text == "unreal":
-            config = {
-                "POSITION": "ATTRIBUTE0", "TANGENT": "ATTRIBUTE1",
-                "BINORMAL": "",           "NORMAL":  "ATTRIBUTE2",
-                "COLOR":    "ATTRIBUTE13","UV":      "ATTRIBUTE5",
-                "UV2":      "ATTRIBUTE6",
-            }
+        config = _ENGINE_TEMPLATES.get(text, {})
         self.settings.setValue("Engine", text)
         for key, edit in self.button_dict.items():
             value = config.get(key, "")
@@ -93,29 +148,64 @@ class QueryDialog(object):
             self.mqt.SetWidgetText(edit, value)
 
     # ------------------------------------------------------------------
-    # main UI builder
+    # Auto-detect from available attributes
     # ------------------------------------------------------------------
+
+    def _apply_auto_detect(self, *_):
+        """Fill attribute fields from heuristic matching of *available_attrs*."""
+        detected = _detect_attrs(self.available_attrs)
+        for key, edit in self.button_dict.items():
+            value = detected.get(key, "")
+            if value:
+                self.settings.setValue(key, value)
+                self.mqt.SetWidgetText(edit, value)
+
+    # ------------------------------------------------------------------
+    # Main UI builder
+    # ------------------------------------------------------------------
+
     def init_ui(self):
-        m = self.mqt
+        m           = self.mqt
         self.widget = m.CreateToplevelWidget(self.title, None)
-        grid = m.CreateGridContainer()
+        grid        = m.CreateGridContainer()
         m.AddWidget(self.widget, grid)
 
-        r = 0   # current row counter
+        r = 0   # row counter
 
-        # ── Mesh ──────────────────────────────────────────────────────
-        self._section(grid, r, "Mesh Export"); r += 1
+        # ── Available Attributes (info only) ──────────────────────────────
+        if self.available_attrs:
+            attrs_str = ", ".join(self.available_attrs)
+            # Truncate if too long for a single label
+            if len(attrs_str) > 80:
+                attrs_str = attrs_str[:77] + "..."
+            self._section(grid, r, "Mesh Export"); r += 1
+            self.mqt.AddGridWidget(
+                grid, r, 0, self._label("Found attrs:"), 1, 1)
+            self.mqt.AddGridWidget(
+                grid, r, 1, self._label(attrs_str), 1, 1)
+            r += 1
+        else:
+            self._section(grid, r, "Mesh Export"); r += 1
 
-        saved_engine = self.settings.value("Engine", "unity")
+        # ── Engine preset ──────────────────────────────────────────────
+        saved_engine     = self.settings.value("Engine", "unity")
         self.engine_combo = self._combo(self.ENGINE_OPTIONS, saved_engine,
                                         self._on_engine_changed)
         self._add_row(grid, r, "Engine", self.engine_combo); r += 1
 
-        saved_mode = self.settings.value("MeshMode", "VS Input")
+        # ── Mesh mode ──────────────────────────────────────────────────
+        saved_mode      = self.settings.value("MeshMode", "VS Input")
         self.mode_combo = self._combo(self.MODE_OPTIONS, saved_mode,
                                       self._on_mode_changed)
         self._add_row(grid, r, "Mesh Mode", self.mode_combo); r += 1
 
+        # ── Export format ──────────────────────────────────────────────
+        saved_fmt        = self.settings.value("ExportFormat", "FBX")
+        self.fmt_combo   = self._combo(self.FORMAT_OPTIONS, saved_fmt,
+                                       self._on_export_format_changed)
+        self._add_row(grid, r, "Format", self.fmt_combo); r += 1
+
+        # ── Attribute mapping fields ───────────────────────────────────
         self.button_dict = {}
         for key, label_text in self.edit_config:
             edit = m.CreateTextBox(True, partial(self._on_attr_changed, key))
@@ -126,7 +216,26 @@ class QueryDialog(object):
             self.button_dict[key] = edit
             self._add_row(grid, r, label_text, edit); r += 1
 
-        # ── Texture ───────────────────────────────────────────────────
+        # ── Auto-detect button (visible only when attrs were found) ────
+        if self.available_attrs:
+            detect_btn = m.CreateButton(self._apply_auto_detect)
+            m.SetWidgetText(detect_btn, "Auto-detect Attributes")
+            m.AddGridWidget(grid, r, 0, detect_btn, 1, 2); r += 1
+
+        # ── UV Flip ────────────────────────────────────────────────────
+        self._section(grid, r, "UV Options"); r += 1
+
+        self.flip_u_check = m.CreateCheckbox(self._on_flip_u)
+        m.SetWidgetChecked(self.flip_u_check,
+            self.settings.value("FlipU", "false") == "true")
+        self._add_row(grid, r, "Flip U", self.flip_u_check); r += 1
+
+        self.flip_v_check = m.CreateCheckbox(self._on_flip_v)
+        m.SetWidgetChecked(self.flip_v_check,
+            self.settings.value("FlipV", "true") == "true")
+        self._add_row(grid, r, "Flip V", self.flip_v_check); r += 1
+
+        # ── Texture ────────────────────────────────────────────────────
         self._section(grid, r, "Texture Export"); r += 1
 
         self.tex_check = m.CreateCheckbox(self._on_tex_check)
@@ -139,10 +248,10 @@ class QueryDialog(object):
             self.settings.value("ExportOutputTextures", "true") == "true")
         self._add_row(grid, r, "Export Outputs", self.tex_output_check); r += 1
 
-        saved_fmt = self.settings.value("TexFormat", "PNG")
-        self.tex_fmt_combo = self._combo(self.FMT_OPTIONS, saved_fmt,
-                                         self._on_fmt_changed)
-        self._add_row(grid, r, "Format", self.tex_fmt_combo); r += 1
+        saved_tex_fmt      = self.settings.value("TexFormat", "PNG")
+        self.tex_fmt_combo = self._combo(self.FMT_OPTIONS, saved_tex_fmt,
+                                         self._on_tex_fmt_changed)
+        self._add_row(grid, r, "Tex Format", self.tex_fmt_combo); r += 1
 
         self.default_name_check = m.CreateCheckbox(self._on_default_name)
         use_default = self.settings.value("TexDefaultName", "true") == "true"
@@ -165,7 +274,6 @@ class QueryDialog(object):
         self._add_row(grid, r, "Suffix", self.tex_suffix_edit); r += 1
 
         self._set_naming_enabled(not use_default)
-        # if FBX prefix is on, disable the manual prefix field
         if tex_fbx_prefix:
             m.SetWidgetEnabled(self.tex_prefix_edit, False)
 
@@ -177,7 +285,6 @@ class QueryDialog(object):
             self.settings.value("ExportShaders", "true") == "true")
         self._add_row(grid, r, "Export", self.shader_check); r += 1
 
-        # shader output format: Binary / Disasm(txt)
         self.shader_fmt_combo = self._combo(
             ["Binary", "Disasm (txt)"],
             self.settings.value("ShaderFmt", "Disasm (txt)"),
@@ -189,7 +296,6 @@ class QueryDialog(object):
         m.SetWidgetChecked(self.shader_fbx_prefix_check, shader_fbx_prefix)
         self._add_row(grid, r, "FBX Name Prefix", self.shader_fbx_prefix_check); r += 1
 
-        # stages: two rows of 3, packed into a single horizontal container each
         self.stage_checks = {}
         for row_keys in [self.STAGE_KEYS[:3], self.STAGE_KEYS[3:]]:
             row_widget = m.CreateHorizontalContainer()
@@ -206,7 +312,7 @@ class QueryDialog(object):
             m.AddGridWidget(grid, r, 0, row_widget, 1, 2); r += 1
 
         # ── OK / Cancel ───────────────────────────────────────────────
-        btn_row = m.CreateHorizontalContainer()
+        btn_row    = m.CreateHorizontalContainer()
         cancel_btn = m.CreateButton(lambda *a: m.CloseCurrentDialog(False))
         ok_btn     = m.CreateButton(self._accept)
         m.SetWidgetText(cancel_btn, "Cancel")
@@ -218,13 +324,23 @@ class QueryDialog(object):
         return self.widget
 
     # ------------------------------------------------------------------
-    # callbacks
+    # Callbacks
     # ------------------------------------------------------------------
+
     def _on_engine_changed(self, ctx, widget, text):
         self._apply_template(text)
 
     def _on_mode_changed(self, ctx, widget, text):
         self.settings.setValue("MeshMode", text)
+
+    def _on_export_format_changed(self, ctx, widget, text):
+        self.settings.setValue("ExportFormat", text)
+
+    def _on_flip_u(self, ctx, widget, checked):
+        self.settings.setValue("FlipU", "true" if checked else "false")
+
+    def _on_flip_v(self, ctx, widget, checked):
+        self.settings.setValue("FlipV", "true" if checked else "false")
 
     def _on_tex_check(self, ctx, widget, checked):
         self.settings.setValue("ExportTextures", "true" if checked else "false")
@@ -232,7 +348,7 @@ class QueryDialog(object):
     def _on_tex_output_check(self, ctx, widget, checked):
         self.settings.setValue("ExportOutputTextures", "true" if checked else "false")
 
-    def _on_fmt_changed(self, ctx, widget, text):
+    def _on_tex_fmt_changed(self, ctx, widget, text):
         self.settings.setValue("TexFormat", text)
 
     def _on_default_name(self, ctx, widget, checked):
@@ -245,8 +361,7 @@ class QueryDialog(object):
 
     def _on_tex_fbx_prefix(self, ctx, widget, checked):
         self.settings.setValue("TexFbxPrefix", "true" if checked else "false")
-        # when enabled, disable the manual prefix field
-        enabled = not checked and not (self.settings.value("TexDefaultName","true") == "true")
+        enabled = not checked and not (self.settings.value("TexDefaultName", "true") == "true")
         self.mqt.SetWidgetEnabled(self.tex_prefix_edit, enabled)
 
     def _on_shader_fbx_prefix(self, ctx, widget, checked):
@@ -267,24 +382,34 @@ class QueryDialog(object):
 
     def _accept(self, ctx, widget, text):
         m = self.mqt
+
+        # Attribute mapping
         self.mapper = {}
         for key, edit in self.button_dict.items():
             self.mapper[key] = m.GetWidgetText(edit)
 
-        self.mapper["ENGINE"]           = self.settings.value("Engine",    "unity")
-        self.mapper["MESH_MODE"]        = self.settings.value("MeshMode", "VS Input")
-        self.mapper["EXPORT_TEXTURES"]       = m.IsWidgetChecked(self.tex_check)
+        # General export options
+        self.mapper["ENGINE"]                 = self.settings.value("Engine",               "unity")
+        self.mapper["MESH_MODE"]              = self.settings.value("MeshMode",             "VS Input")
+        self.mapper["EXPORT_FORMAT"]          = self.settings.value("ExportFormat",         "FBX")
+        self.mapper["FLIP_U"]                 = m.IsWidgetChecked(self.flip_u_check)
+        self.mapper["FLIP_V"]                 = m.IsWidgetChecked(self.flip_v_check)
+
+        # Texture options
+        self.mapper["EXPORT_TEXTURES"]        = m.IsWidgetChecked(self.tex_check)
         self.mapper["EXPORT_OUTPUT_TEXTURES"] = m.IsWidgetChecked(self.tex_output_check)
-        self.mapper["TEX_FORMAT"]       = self.settings.value("TexFormat", "PNG")
-        self.mapper["TEX_DEFAULT_NAME"] = m.IsWidgetChecked(self.default_name_check)
-        self.mapper["TEX_PREFIX"]       = m.GetWidgetText(self.tex_prefix_edit)
-        self.mapper["TEX_INFIX"]        = m.GetWidgetText(self.tex_infix_edit)
-        self.mapper["TEX_SUFFIX"]       = m.GetWidgetText(self.tex_suffix_edit)
-        self.mapper["TEX_FBX_PREFIX"]   = m.IsWidgetChecked(self.tex_fbx_prefix_check)
-        self.mapper["EXPORT_SHADERS"]   = m.IsWidgetChecked(self.shader_check)
-        self.mapper["SHADER_FMT"]       = self.settings.value("ShaderFmt", "Binary")
-        self.mapper["SHADER_FBX_PREFIX"]= m.IsWidgetChecked(self.shader_fbx_prefix_check)
-        self.mapper["SHADER_STAGES"]    = {
+        self.mapper["TEX_FORMAT"]             = self.settings.value("TexFormat",            "PNG")
+        self.mapper["TEX_DEFAULT_NAME"]       = m.IsWidgetChecked(self.default_name_check)
+        self.mapper["TEX_PREFIX"]             = m.GetWidgetText(self.tex_prefix_edit)
+        self.mapper["TEX_INFIX"]              = m.GetWidgetText(self.tex_infix_edit)
+        self.mapper["TEX_SUFFIX"]             = m.GetWidgetText(self.tex_suffix_edit)
+        self.mapper["TEX_FBX_PREFIX"]         = m.IsWidgetChecked(self.tex_fbx_prefix_check)
+
+        # Shader options
+        self.mapper["EXPORT_SHADERS"]         = m.IsWidgetChecked(self.shader_check)
+        self.mapper["SHADER_FMT"]             = self.settings.value("ShaderFmt",            "Binary")
+        self.mapper["SHADER_FBX_PREFIX"]      = m.IsWidgetChecked(self.shader_fbx_prefix_check)
+        self.mapper["SHADER_STAGES"]          = {
             k: m.IsWidgetChecked(v) for k, v in self.stage_checks.items()
         }
 
