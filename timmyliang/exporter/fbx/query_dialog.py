@@ -206,20 +206,24 @@ class QueryDialog(object):
         self._add_row(grid, r, "Format", self.fmt_combo); r += 1
 
         # ── VS Output options ──────────────────────────────────────────
-        # These two controls are only meaningful when Mesh Mode = "VS Output".
-        # They embed UV / Normal data from the VS Input vertex buffer into the
-        # exported file so the mesh is immediately usable without a second pass.
+        # The controls below only take effect when Mesh Mode = "VS Output".
+        # Each one embeds the corresponding VS Input attribute (using the
+        # attribute name filled in the field above) into the exported file.
         self._section(grid, r, "VS Output Extras (from VS Input)"); r += 1
 
-        self.vsout_uv_check = m.CreateCheckbox(self._on_vsout_uv)
-        m.SetWidgetChecked(self.vsout_uv_check,
-            self.settings.value("VSOutIncludeVSInUV", "true") == "true")
-        self._add_row(grid, r, "Include UV", self.vsout_uv_check); r += 1
-
-        self.vsout_normal_check = m.CreateCheckbox(self._on_vsout_normal)
-        m.SetWidgetChecked(self.vsout_normal_check,
-            self.settings.value("VSOutIncludeVSInNormal", "true") == "true")
-        self._add_row(grid, r, "Include Normal", self.vsout_normal_check); r += 1
+        _vsout_checks = [
+            ("vsout_uv_check",      "VSOutIncludeVSInUV",      "UV",       "_on_vsout_uv"),
+            ("vsout_uv2_check",     "VSOutIncludeVSInUV2",     "UV2",      "_on_vsout_uv2"),
+            ("vsout_normal_check",  "VSOutIncludeVSInNormal",  "Normal",   "_on_vsout_normal"),
+            ("vsout_tangent_check", "VSOutIncludeVSInTangent", "Tangent",  "_on_vsout_tangent"),
+            ("vsout_binorm_check",  "VSOutIncludeVSInBinormal","BiNormal", "_on_vsout_binorm"),
+            ("vsout_color_check",   "VSOutIncludeVSInColor",   "Color",    "_on_vsout_color"),
+        ]
+        for attr_name, setting_key, label, cb_name in _vsout_checks:
+            chk = m.CreateCheckbox(getattr(self, cb_name))
+            m.SetWidgetChecked(chk, self.settings.value(setting_key, "true") == "true")
+            setattr(self, attr_name, chk)
+            self._add_row(grid, r, label, chk); r += 1
 
         # ── Attribute mapping fields ───────────────────────────────────
         self.button_dict = {}
@@ -353,10 +357,22 @@ class QueryDialog(object):
         self.settings.setValue("ExportFormat", text)
 
     def _on_vsout_uv(self, ctx, widget, checked):
-        self.settings.setValue("VSOutIncludeVSInUV", "true" if checked else "false")
+        self.settings.setValue("VSOutIncludeVSInUV",      "true" if checked else "false")
+
+    def _on_vsout_uv2(self, ctx, widget, checked):
+        self.settings.setValue("VSOutIncludeVSInUV2",     "true" if checked else "false")
 
     def _on_vsout_normal(self, ctx, widget, checked):
-        self.settings.setValue("VSOutIncludeVSInNormal", "true" if checked else "false")
+        self.settings.setValue("VSOutIncludeVSInNormal",  "true" if checked else "false")
+
+    def _on_vsout_tangent(self, ctx, widget, checked):
+        self.settings.setValue("VSOutIncludeVSInTangent", "true" if checked else "false")
+
+    def _on_vsout_binorm(self, ctx, widget, checked):
+        self.settings.setValue("VSOutIncludeVSInBinormal","true" if checked else "false")
+
+    def _on_vsout_color(self, ctx, widget, checked):
+        self.settings.setValue("VSOutIncludeVSInColor",   "true" if checked else "false")
 
     def _on_flip_u(self, ctx, widget, checked):
         self.settings.setValue("FlipU", "true" if checked else "false")
@@ -411,13 +427,18 @@ class QueryDialog(object):
             self.mapper[key] = m.GetWidgetText(edit)
 
         # General export options
-        self.mapper["ENGINE"]                    = self.settings.value("Engine",               "unity")
-        self.mapper["MESH_MODE"]                 = self.settings.value("MeshMode",             "VS Input")
-        self.mapper["EXPORT_FORMAT"]             = self.settings.value("ExportFormat",         "FBX")
-        self.mapper["VSOUT_INCLUDE_VSIN_UV"]     = m.IsWidgetChecked(self.vsout_uv_check)
-        self.mapper["VSOUT_INCLUDE_VSIN_NORMAL"] = m.IsWidgetChecked(self.vsout_normal_check)
-        self.mapper["FLIP_U"]                    = m.IsWidgetChecked(self.flip_u_check)
-        self.mapper["FLIP_V"]                    = m.IsWidgetChecked(self.flip_v_check)
+        self.mapper["ENGINE"]      = self.settings.value("Engine",     "unity")
+        self.mapper["MESH_MODE"]   = self.settings.value("MeshMode",   "VS Input")
+        self.mapper["EXPORT_FORMAT"]= self.settings.value("ExportFormat","FBX")
+        # VS Output pass-through attributes
+        self.mapper["VSOUT_INCLUDE_VSIN_UV"]      = m.IsWidgetChecked(self.vsout_uv_check)
+        self.mapper["VSOUT_INCLUDE_VSIN_UV2"]     = m.IsWidgetChecked(self.vsout_uv2_check)
+        self.mapper["VSOUT_INCLUDE_VSIN_NORMAL"]  = m.IsWidgetChecked(self.vsout_normal_check)
+        self.mapper["VSOUT_INCLUDE_VSIN_TANGENT"] = m.IsWidgetChecked(self.vsout_tangent_check)
+        self.mapper["VSOUT_INCLUDE_VSIN_BINORMAL"]= m.IsWidgetChecked(self.vsout_binorm_check)
+        self.mapper["VSOUT_INCLUDE_VSIN_COLOR"]   = m.IsWidgetChecked(self.vsout_color_check)
+        self.mapper["FLIP_U"] = m.IsWidgetChecked(self.flip_u_check)
+        self.mapper["FLIP_V"] = m.IsWidgetChecked(self.flip_v_check)
 
         # Texture options
         self.mapper["EXPORT_TEXTURES"]        = m.IsWidgetChecked(self.tex_check)

@@ -774,37 +774,62 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
 
         save_name = os.path.basename(os.path.splitext(save_path)[0])
 
-        # ── Optional: UV and Normal pass-through from VS Input ────────────────
-        # VS Output only stores SV_Position in its default single-attribute
-        # MeshFormat.  UV / Normal are read from the VS Input vertex buffer
-        # (same draw call, same index buffer) and embedded as FBX layer elements
-        # so the exported mesh is immediately usable in DCC tools.
-        layer_uv      = ""
-        layer_uv_ins  = ""
-        layer_nrm     = ""
-        layer_nrm_ins = ""
+        # ── VS Input attribute pass-through ───────────────────────────────────
+        # VS Output MeshFormat only exposes SV_Position.  All other channels
+        # (UV, UV2, Normal, Tangent, BiNormal, Color) are borrowed from the VS
+        # Input vertex buffer, which uses the same index buffer and therefore
+        # the same vertex ordering as the VS Output buffer.
+        #
+        # Mapping strategy
+        # ─────────────────
+        # UV / UV2  →  per-unique-vertex (IndexToDirect).
+        #   The table has one row per draw-index; we deduplicate by vertex-index
+        #   to build a compact UV array, then use idx_list as the UV-index array.
+        #   This matches how export_fbx writes UV.
+        #
+        # Normal / Tangent / BiNormal / Color  →  per-polygon-vertex (Direct /
+        #   IndexToDirect-with-sequential-indices).
+        #   We write vs_in_data[attr][i] for face-corner i because the VS Input
+        #   table rows are in draw-index order, identical to idx_list order.
+        #   This preserves hard-edge (seam) normals correctly.
 
-        vsout_uv     = mapper.get("VSOUT_INCLUDE_VSIN_UV",     True)
-        vsout_normal = mapper.get("VSOUT_INCLUDE_VSIN_NORMAL", True)
-        UV           = mapper.get("UV",     "")
-        NORMAL       = mapper.get("NORMAL", "")
-        ENGINE       = mapper.get("ENGINE", "unity")
-        flip_u       = mapper.get("FLIP_U", False)
-        flip_v       = mapper.get("FLIP_V", True)
+        ENGINE  = mapper.get("ENGINE",   "unity")
+        flip_u  = mapper.get("FLIP_U",  False)
+        flip_v  = mapper.get("FLIP_V",  True)
+
+        UV      = mapper.get("UV",       "")
+        UV2     = mapper.get("UV2",      "")
+        NORMAL  = mapper.get("NORMAL",   "")
+        TANGENT = mapper.get("TANGENT",  "")
+        BINORM  = mapper.get("BINORMAL", "")
+        COLOR   = mapper.get("COLOR",    "")
+
+        vsout_uv      = mapper.get("VSOUT_INCLUDE_VSIN_UV",      True)
+        vsout_uv2     = mapper.get("VSOUT_INCLUDE_VSIN_UV2",     True)
+        vsout_normal  = mapper.get("VSOUT_INCLUDE_VSIN_NORMAL",  True)
+        vsout_tangent = mapper.get("VSOUT_INCLUDE_VSIN_TANGENT", True)
+        vsout_binorm  = mapper.get("VSOUT_INCLUDE_VSIN_BINORMAL",True)
+        vsout_color   = mapper.get("VSOUT_INCLUDE_VSIN_COLOR",   True)
+
+        layer_uv      = "";  layer_uv_ins  = ""
+        layer_uv2     = "";  layer_uv2_ins = ""
+        layer_nrm     = "";  layer_nrm_ins = ""
+        layer_tan     = "";  layer_tan_ins = ""
+        layer_bn      = "";  layer_bn_ins  = ""
+        layer_col     = "";  layer_col_ins = ""
 
         if vs_in_data and idx_list:
             vsin_idxs    = vs_in_data.get("IDX", [])
             vsin_attrs   = vs_in_attr_list or set()
+            n_fc         = len(idx_list)          # face corners
             min_vsin_idx = min(vsin_idxs) if vsin_idxs else 0
 
-            # Build per-unique-vertex lookup keyed by 0-based normalized index.
-            # This MUST match the normalization applied inside _read_index_buffer
-            # (min subtracted), so idx_list values correctly index into vsin_vdata.
+            # Unique-vertex lookup (0-based keys) — used only for UV / UV2
             vsin_vdata = defaultdict(dict)
             for row, vidx in enumerate(vsin_idxs):
                 nvidx = vidx - min_vsin_idx
-                for attr in vsin_attrs:
-                    if nvidx not in vsin_vdata[attr]:
+                for attr in (UV, UV2):
+                    if attr and attr in vsin_attrs and nvidx not in vsin_vdata[attr]:
                         vsin_vdata[attr][nvidx] = vs_in_data[attr][row]
 
             def _xform3(vals):
@@ -813,7 +838,12 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
                 x, y, z = vals[:3]
                 return [-x, z, -y]
 
-            # ── UV layer (IndexToDirect: unique UVs sorted by vertex index) ───
+            def _get_row(attr, i, default):
+                """Safe per-polygon-vertex access into VS Input table data."""
+                col = vs_in_data.get(attr)
+                return col[i] if col and i < len(col) else default
+
+            # ── UV0 (IndexToDirect, per-unique-vertex) ───────────────────────
             if vsout_uv and UV and vsin_vdata.get(UV):
                 uvs = [
                     str((1.0 - v if flip_u else v) if dim == 0
@@ -836,20 +866,52 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
                         }
                     }
                 """ % {"uvs": ",".join(uvs), "uvs_num": len(uvs),
-                       "uvi": uvi,            "uvi_num": len(idx_list)}
+                       "uvi": uvi,            "uvi_num": n_fc}
                 layer_uv_ins = """
                     LayerElement: {
                         Type: "LayerElementUV"
                         TypedIndex: 0
                     }
                 """
-                info_list.append("uv=%s (%d unique verts)" % (UV, len(uvs) // 2))
+                info_list.append("uv=%s (%d unique)" % (UV, len(uvs) // 2))
 
-            # ── Normal layer (ByPolygonVertex Direct: one per face corner) ────
-            if vsout_normal and NORMAL and vsin_vdata.get(NORMAL):
+            # ── UV1 (IndexToDirect, per-unique-vertex) ───────────────────────
+            if vsout_uv2 and UV2 and vsin_vdata.get(UV2):
+                uvs2 = [
+                    str((1.0 - v if flip_u else v) if dim == 0
+                        else (1.0 - v if flip_v else v))
+                    for _, vals in sorted(vsin_vdata[UV2].items())
+                    for dim, v in enumerate(vals[:2])
+                ]
+                uvi2 = ",".join(str(i) for i in idx_list)
+                layer_uv2 = """
+                    LayerElementUV: 1 {
+                        Version: 101
+                        Name: "map2"
+                        MappingInformationType: "ByPolygonVertex"
+                        ReferenceInformationType: "IndexToDirect"
+                        UV: *%(uvs_num)s {
+                            a: %(uvs)s
+                        }
+                        UVIndex: *%(uvi_num)s {
+                            a: %(uvi)s
+                        }
+                    }
+                """ % {"uvs": ",".join(uvs2), "uvs_num": len(uvs2),
+                       "uvi": uvi2,            "uvi_num": n_fc}
+                layer_uv2_ins = """
+                    LayerElement: {
+                        Type: "LayerElementUV"
+                        TypedIndex: 1
+                    }
+                """
+                info_list.append("uv2=%s (%d unique)" % (UV2, len(uvs2) // 2))
+
+            # ── Normal (ByPolygonVertex Direct) ──────────────────────────────
+            if vsout_normal and NORMAL and NORMAL in vsin_attrs:
                 nrms = []
-                for vidx in idx_list:
-                    n = _xform3(vsin_vdata[NORMAL].get(vidx, [0.0, 0.0, 1.0]))
+                for i in range(n_fc):
+                    n = _xform3(_get_row(NORMAL, i, [0.0, 0.0, 1.0]))
                     nrms.extend(str(x) for x in n)
                 layer_nrm = """
                     LayerElementNormal: 0 {
@@ -868,7 +930,91 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
                         TypedIndex: 0
                     }
                 """
-                info_list.append("normal=%s (%d face corners)" % (NORMAL, len(nrms) // 3))
+                info_list.append("normal=%s (%d corners)" % (NORMAL, n_fc))
+
+            # ── Tangent (ByPolygonVertex Direct) ─────────────────────────────
+            if vsout_tangent and TANGENT and TANGENT in vsin_attrs:
+                tans = []
+                for i in range(n_fc):
+                    t = _xform3(_get_row(TANGENT, i, [1.0, 0.0, 0.0]))
+                    tans.extend(str(x) for x in t)
+                layer_tan = """
+                    LayerElementTangent: 0 {
+                        Version: 101
+                        Name: "map1"
+                        MappingInformationType: "ByPolygonVertex"
+                        ReferenceInformationType: "Direct"
+                        Tangents: *%(n)s {
+                            a: %(v)s
+                        }
+                    }
+                """ % {"n": len(tans), "v": ",".join(tans)}
+                layer_tan_ins = """
+                    LayerElement: {
+                        Type: "LayerElementTangent"
+                        TypedIndex: 0
+                    }
+                """
+                info_list.append("tangent=%s" % TANGENT)
+
+            # ── BiNormal (ByPolygonVertex Direct) ────────────────────────────
+            if vsout_binorm and BINORM and BINORM in vsin_attrs:
+                bns = []
+                for i in range(n_fc):
+                    b = _xform3(_get_row(BINORM, i, [0.0, 1.0, 0.0]))
+                    bns.extend(str(-float(x)) for x in b)   # negate, same as export_fbx
+                layer_bn = """
+                    LayerElementBinormal: 0 {
+                        Version: 101
+                        Name: "map1"
+                        MappingInformationType: "ByPolygonVertex"
+                        ReferenceInformationType: "Direct"
+                        Binormals: *%(n)s {
+                            a: %(v)s
+                        }
+                        BinormalsW: *%(wn)s {
+                            a: %(w)s
+                        }
+                    }
+                """ % {"n":  len(bns), "v": ",".join(bns),
+                       "wn": n_fc,     "w": ",".join(["1"] * n_fc)}
+                layer_bn_ins = """
+                    LayerElement: {
+                        Type: "LayerElementBinormal"
+                        TypedIndex: 0
+                    }
+                """
+                info_list.append("binormal=%s" % BINORM)
+
+            # ── Color (ByPolygonVertex IndexToDirect, sequential index) ───────
+            if vsout_color and COLOR and COLOR in vsin_attrs:
+                cols = []
+                for i in range(n_fc):
+                    c = _get_row(COLOR, i, [1.0, 1.0, 1.0, 1.0])
+                    cols.extend(str(x) for x in c[:4])
+                col_idx = ",".join(str(i) for i in range(n_fc))
+                layer_col = """
+                    LayerElementColor: 0 {
+                        Version: 101
+                        Name: "colorSet1"
+                        MappingInformationType: "ByPolygonVertex"
+                        ReferenceInformationType: "IndexToDirect"
+                        Colors: *%(n)s {
+                            a: %(v)s
+                        }
+                        ColorIndex: *%(in_num)s {
+                            a: %(idx)s
+                        }
+                    }
+                """ % {"n": len(cols), "v": ",".join(cols),
+                       "in_num": n_fc,  "idx": col_idx}
+                layer_col_ins = """
+                    LayerElement: {
+                        Type: "LayerElementColor"
+                        TypedIndex: 0
+                    }
+                """
+                info_list.append("color=%s" % COLOR)
 
         ARGS = {
             "model_name":                save_name,
@@ -878,16 +1024,16 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
             "polygons_num":              len(polygons),
             "LayerElementNormal":        layer_nrm,
             "LayerElementNormalInsert":  layer_nrm_ins,
-            "LayerElementBiNormal":      "",
-            "LayerElementBiNormalInsert":"",
-            "LayerElementTangent":       "",
-            "LayerElementTangentInsert": "",
-            "LayerElementColor":         "",
-            "LayerElementColorInsert":   "",
+            "LayerElementBiNormal":      layer_bn,
+            "LayerElementBiNormalInsert":layer_bn_ins,
+            "LayerElementTangent":       layer_tan,
+            "LayerElementTangentInsert": layer_tan_ins,
+            "LayerElementColor":         layer_col,
+            "LayerElementColorInsert":   layer_col_ins,
             "LayerElementUV":            layer_uv,
             "LayerElementUVInsert":      layer_uv_ins,
-            "LayerElementUV2":           "",
-            "LayerElementUV2Insert":     "",
+            "LayerElementUV2":           layer_uv2,
+            "LayerElementUV2Insert":     layer_uv2_ins,
         }
         fbx = FBX_ASCII_TEMPLETE % ARGS
         with open(save_path, "w") as f:
@@ -1163,8 +1309,12 @@ def _build_settings_mapper(settings):
                           "true" if QueryDialog.STAGE_DEFAULTS.get(k, False) else "false") == "true"
         for k in QueryDialog.STAGE_KEYS
     }
-    mapper["VSOUT_INCLUDE_VSIN_UV"]     = settings.value("VSOutIncludeVSInUV",     "true") == "true"
-    mapper["VSOUT_INCLUDE_VSIN_NORMAL"] = settings.value("VSOutIncludeVSInNormal", "true") == "true"
+    mapper["VSOUT_INCLUDE_VSIN_UV"]      = settings.value("VSOutIncludeVSInUV",      "true") == "true"
+    mapper["VSOUT_INCLUDE_VSIN_UV2"]     = settings.value("VSOutIncludeVSInUV2",     "true") == "true"
+    mapper["VSOUT_INCLUDE_VSIN_NORMAL"]  = settings.value("VSOutIncludeVSInNormal",  "true") == "true"
+    mapper["VSOUT_INCLUDE_VSIN_TANGENT"] = settings.value("VSOutIncludeVSInTangent", "true") == "true"
+    mapper["VSOUT_INCLUDE_VSIN_BINORMAL"]= settings.value("VSOutIncludeVSInBinormal","true") == "true"
+    mapper["VSOUT_INCLUDE_VSIN_COLOR"]   = settings.value("VSOutIncludeVSInColor",   "true") == "true"
     return mapper
 
 
@@ -1322,9 +1472,12 @@ def prepare_export(pyrenderdoc, data):
         _run_mesh_export(save_path, dialog.mapper, data, attr_list,
                          pyrenderdoc, fbx_info, fbx_errors)
     else:
-        # VS Output: also read VS Input table for UV/Normal pass-through
-        need_vsin = (dialog.mapper.get("VSOUT_INCLUDE_VSIN_UV",     True) or
-                     dialog.mapper.get("VSOUT_INCLUDE_VSIN_NORMAL", True))
+        # VS Output: also read VS Input table for attribute pass-through
+        need_vsin = any(dialog.mapper.get(k, True) for k in (
+            "VSOUT_INCLUDE_VSIN_UV", "VSOUT_INCLUDE_VSIN_UV2",
+            "VSOUT_INCLUDE_VSIN_NORMAL", "VSOUT_INCLUDE_VSIN_TANGENT",
+            "VSOUT_INCLUDE_VSIN_BINORMAL", "VSOUT_INCLUDE_VSIN_COLOR",
+        ))
         if need_vsin:
             vs_in_data, vs_in_attr_list = _collect_mesh_data(main_window)
         else:
@@ -1392,8 +1545,11 @@ def prepare_quick_export(pyrenderdoc, data):
         _run_mesh_export(save_path, mapper, data, attr_list,
                          pyrenderdoc, fbx_info, fbx_errors)
     else:
-        need_vsin = (mapper.get("VSOUT_INCLUDE_VSIN_UV",     True) or
-                     mapper.get("VSOUT_INCLUDE_VSIN_NORMAL", True))
+        need_vsin = any(mapper.get(k, True) for k in (
+            "VSOUT_INCLUDE_VSIN_UV", "VSOUT_INCLUDE_VSIN_UV2",
+            "VSOUT_INCLUDE_VSIN_NORMAL", "VSOUT_INCLUDE_VSIN_TANGENT",
+            "VSOUT_INCLUDE_VSIN_BINORMAL", "VSOUT_INCLUDE_VSIN_COLOR",
+        ))
         if need_vsin:
             vs_in_data, vs_in_attr_list = _collect_mesh_data(main_window)
         else:
