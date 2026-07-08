@@ -1957,6 +1957,7 @@ def prepare_export(pyrenderdoc, data):
                 "Error",
             )
             return
+        data, attr_list = _add_input_aliases(data, attr_list)
         print("elapsed time unpack: %s" % (time.time() - current))
         _run_mesh_export(save_path, dialog.mapper, data, attr_list,
                          pyrenderdoc, fbx_info, fbx_errors)
