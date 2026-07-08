@@ -133,17 +133,17 @@ class QueryDialog(object):
         self.mqt.AddGridWidget(grid, row, 1, widget, 1, 1)
 
     def _add_two_per_row(self, grid, row, items_2col):
-        """Place two labeled-checkbox items side-by-side in one row.
+        """Place two labeled-checkbox items side-by-side in one row (2 per row)."""
+        self._add_n_per_row(grid, row, items_2col, n=2)
 
-        *items_2col* is a list of (attr_name, setting_key, label, cb_name,
-        default) tuples; at most 2 are consumed per call.
+    def _add_n_per_row(self, grid, row, items, n=2):
+        """Place up to *n* labeled-checkbox items side-by-side in one row.
 
-        Layout (4 virtual columns):
-          col 0 = label-1   col 1 = checkbox-1
-          col 2 = label-2   col 3 = checkbox-2
+        Each item is a tuple (attr_name, setting_key, label, cb_name, default).
+        Layout: col 0=label0, col 1=check0, col 2=label1, col 3=check1, …
         """
         m = self.mqt
-        for ci, (attr_name, setting_key, label, cb_name, default) in enumerate(items_2col[:2]):
+        for ci, (attr_name, setting_key, label, cb_name, default) in enumerate(items[:n]):
             chk = m.CreateCheckbox(getattr(self, cb_name))
             m.SetWidgetChecked(chk, self.settings.value(setting_key, default) == "true")
             setattr(self, attr_name, chk)
@@ -224,9 +224,7 @@ class QueryDialog(object):
         self._add_row(grid, r, "Format", self.fmt_combo); r += 1
 
         # ── VS Output options ──────────────────────────────────────────
-        # The controls below only take effect when Mesh Mode = "VS Output".
-        # Each one embeds the corresponding VS Input attribute (using the
-        # attribute name filled in the field above) into the exported file.
+        # 6个主选项 3个/排 → 2行; Bake World Space + Skin Weights 2个/排 → 1行
         self._section(grid, r, "VS Output Extras (from VS Input)"); r += 1
 
         _vsout_checks = [
@@ -237,27 +235,22 @@ class QueryDialog(object):
             ("vsout_binorm_check",  "VSOutIncludeVSInBinormal","BiNormal", "_on_vsout_binorm",  "true"),
             ("vsout_color_check",   "VSOutIncludeVSInColor",   "Color",    "_on_vsout_color",   "true"),
         ]
-        for i in range(0, len(_vsout_checks), 2):
-            self._add_two_per_row(grid, r, _vsout_checks[i:i+2]); r += 1
+        for i in range(0, len(_vsout_checks), 3):
+            self._add_n_per_row(grid, r, _vsout_checks[i:i+3], n=3); r += 1
 
-        # ── Bake World Space (VS Output only) ─────────────────────────────
-        self.bake_world_check = m.CreateCheckbox(self._on_bake_world)
-        m.SetWidgetChecked(self.bake_world_check,
-                           self.settings.value("BakeWorldSpace", "false") == "true")
-        self._add_row(grid, r, "Bake World Space", self.bake_world_check); r += 1
+        # Bake World Space + Export Skin Weights — 2个/排，集中在同一 section
+        _vsout_extra2 = [
+            ("bake_world_check",   "BakeWorldSpace", "Bake World",    "_on_bake_world",   "false"),
+            ("export_skin_check",  "ExportSkin",     "Skin Weights",  "_on_export_skin",  "false"),
+        ]
+        self._add_n_per_row(grid, r, _vsout_extra2, n=2); r += 1
 
-        # ── Export Skin Weights ────────────────────────────────────────────
-        self.export_skin_check = m.CreateCheckbox(self._on_export_skin)
-        m.SetWidgetChecked(self.export_skin_check,
-                           self.settings.value("ExportSkin", "false") == "true")
-        self._add_row(grid, r, "Export Skin Weights", self.export_skin_check); r += 1
-
-        # ── Batch EID input ────────────────────────────────────────────────
-        self.batch_eids_edit = m.CreateTextBox(False, self._on_batch_eids)
+        # ── Batch EID input (单行高度) ─────────────────────────────────────
+        self.batch_eids_edit = m.CreateTextBox(True, self._on_batch_eids)
         _saved_eids = self.settings.value("BatchEIDs", "")
         if _saved_eids:
             m.SetWidgetText(self.batch_eids_edit, _saved_eids)
-        self._add_row(grid, r, "批量EID (如:100,200-210)", self.batch_eids_edit); r += 1
+        self._add_row(grid, r, "批量EID(如:100,200-210)", self.batch_eids_edit); r += 1
 
         # ── Attribute mapping fields ───────────────────────────────────
         self.button_dict = {}
@@ -297,12 +290,14 @@ class QueryDialog(object):
         self.tex_check = m.CreateCheckbox(self._on_tex_check)
         m.SetWidgetChecked(self.tex_check,
             self.settings.value("ExportTextures", "true") == "true")
-        self._add_row(grid, r, "Export Inputs", self.tex_check); r += 1
-
         self.tex_output_check = m.CreateCheckbox(self._on_tex_output_check)
         m.SetWidgetChecked(self.tex_output_check,
             self.settings.value("ExportOutputTextures", "true") == "true")
-        self._add_row(grid, r, "Export Outputs", self.tex_output_check); r += 1
+        m.AddGridWidget(grid, r, 0, self._label("Export Inputs"),  1, 1)
+        m.AddGridWidget(grid, r, 1, self.tex_check,                1, 1)
+        m.AddGridWidget(grid, r, 2, self._label("Export Outputs"), 1, 1)
+        m.AddGridWidget(grid, r, 3, self.tex_output_check,         1, 1)
+        r += 1
 
         saved_tex_fmt      = self.settings.value("TexFormat", "PNG")
         self.tex_fmt_combo = self._combo(self.FMT_OPTIONS, saved_tex_fmt,
