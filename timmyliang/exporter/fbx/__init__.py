@@ -391,14 +391,39 @@ def export_fbx(save_path, mapper, data, attr_list, controller):
             """
 
         def run_uv(self):
-            if not vertex_data.get(UV):
+            # Auto-select best UV0 among comp=2 attributes.
+            # In Vulkan Unreal games, UV0 is at _input3/ATTRIBUTE3 (location 3)
+            # while _input4/ATTRIBUTE4 (location 4) is UV1.  Try all comp=2
+            # candidates and pick the one with the most UV-like values.
+            _uv_key = UV
+            _best_score = 0
+            for _ck in ([UV] if UV else []) + ["ATTRIBUTE3", "ATTRIBUTE4",
+                                                "_input3", "_input4"]:
+                _cdata = vertex_data.get(_ck)
+                if not _cdata:
+                    continue
+                # Each value should be a 2-element sequence
+                _sample = list(_cdata.values())[:30]
+                if not (_sample and hasattr(_sample[0], '__len__') and len(_sample[0]) >= 2):
+                    continue
+                _vals = [abs(v) for vals in _sample for v in list(vals)[:2] if v == v]
+                _mx = max(_vals) if _vals else 0
+                _nz = sum(1 for v in _vals if v > 0.001)
+                if not (0.001 <= _mx <= 10.0 and _nz >= len(_vals) * 0.3):
+                    continue
+                _sc = _nz + len(set(round(v, 2) for v in _vals))
+                if _sc > _best_score:
+                    _best_score = _sc
+                    _uv_key = _ck
+
+            if not vertex_data.get(_uv_key):
                 return
             uv_index_values = reorder_triangle_corners(idx_list)
             uvs_indices     = ",".join([str(idx) for idx in uv_index_values])
             uvs = [
                 str((1 - v if flip_u else v) if i == 0 else (1 - v if flip_v else v))
-                for idx, values in sorted(vertex_data[UV].items())
-                for i, v in enumerate(values)
+                for idx, values in sorted(vertex_data[_uv_key].items())
+                for i, v in enumerate(values[:2])
             ]
             ARGS["LayerElementUV"] = """
                 LayerElementUV: 0 {
@@ -1213,13 +1238,34 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
         # than our own GPU byte-offset + format guessing in _read_vsin_attrs_from_gpu.
         # The "IDX" column gives raw VS-Input vertex indices matching the draw IB.
         _qt_uv_key = None
+        # Search order: mapper UV key first, then common Vulkan locations.
+        # For each candidate, verify the data actually looks like UV (float2,
+        # values in [0, 10] range, non-zero variation) so we skip normals /
+        # tangents / other comp=2 attributes that aren't UV.
+        def _uv_candidate_score(key):
+            """Return a score ≥1 if key looks like UV, else 0."""
+            if not (vs_in_data and vs_in_data.get(key)):
+                return 0
+            _s = vs_in_data[key]
+            if not (_s and hasattr(_s[0], '__len__') and len(_s[0]) >= 2):
+                return 0
+            _vals = [abs(v) for e in _s[:30] for v in e[:2] if v == v]
+            _mx = max(_vals) if _vals else 0
+            _nz = sum(1 for v in _vals if v > 0.001)
+            if not (0.001 <= _mx <= 10.0 and _nz >= len(_vals) * 0.3):
+                return 0
+            return _nz + len(set(round(v, 2) for v in _vals))  # higher = more varied
+
+        _qt_uv_key = None
+        _best_uv_score = 0
         for _qk in ([UV] if UV else []) + ["_input4", "_input3", "_input2"]:
-            if vs_in_data and vs_in_data.get(_qk):
-                # Quick sanity: must be a list of 2-element sequences (UV pairs)
-                _sample_qt = vs_in_data[_qk]
-                if _sample_qt and hasattr(_sample_qt[0], '__len__') and len(_sample_qt[0]) >= 2:
-                    _qt_uv_key = _qk
-                    break
+            _sc = _uv_candidate_score(_qk)
+            if _sc > _best_uv_score:
+                _best_uv_score = _sc
+                _qt_uv_key = _qk
+            # Stop early if the mapper's own key scored well — trust it
+            if _qt_uv_key == UV and _sc >= 10:
+                break
 
         if vsout_uv and _qt_uv_key:
             try:
@@ -1239,8 +1285,8 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
                                         for _i in range(_max_ni + 1)]
                         # Rebuild corner→vertex index from Qt IDX (consistency)
                         vsin_nidxs = [_qi[fc] - _min_qi for fc in range(n_fc)]
-                        info_list.append("UV: Qt-table override (%s) %d unique/%d corners" % (
-                            _qt_uv_key, len(_uv_map), n_fc))
+                        info_list.append("UV: Qt-table override (%s score=%d) %d unique/%d corners" % (
+                            _qt_uv_key, _best_uv_score, len(_uv_map), n_fc))
             except Exception as _e_qt:
                 info_list.append("UV: Qt-table override failed: %s" % str(_e_qt))
 
