@@ -144,10 +144,10 @@ def _build_fbx_material(save_dir, fbx_name):
         return "", ""
 
     # Classify textures by common suffix patterns
-    _NORMAL_SUFFIXES  = re.compile(r"_n(rm|ormal|ormal_map)?$", re.IGNORECASE)
-    _ROUGH_SUFFIXES   = re.compile(r"_(rough|roughness|orm|pbr)$", re.IGNORECASE)
-    _METAL_SUFFIXES   = re.compile(r"_(metal|metallic|m)$",        re.IGNORECASE)
-    _EMIT_SUFFIXES    = re.compile(r"_(emit|emissive|e)$",          re.IGNORECASE)
+    _NORMAL_SUFFIXES  = _re.compile(r"_n(rm|ormal|ormal_map)?$", _re.IGNORECASE)
+    _ROUGH_SUFFIXES   = _re.compile(r"_(rough|roughness|orm|pbr)$", _re.IGNORECASE)
+    _METAL_SUFFIXES   = _re.compile(r"_(metal|metallic|m)$",        _re.IGNORECASE)
+    _EMIT_SUFFIXES    = _re.compile(r"_(emit|emissive|e)$",          _re.IGNORECASE)
 
     _diffuse   = None   # first non-special image (probably diffuse / albedo)
     _normal_m  = None
@@ -389,6 +389,17 @@ def export_fbx(save_path, mapper, data, attr_list, controller):
         def run_normals(self):
             if not vertex_data.get(NORMAL):
                 return
+            # ── Diagnostic: show first-vertex values for NORMAL & TANGENT ──
+            # If normals look like tangents, ATTRIBUTE1/ATTRIBUTE2 may be swapped.
+            # Check: normal vectors should be ~unit-length; dot(normal, tangent)≈0.
+            _nv0 = next(iter(vertex_data[NORMAL].values()), None)
+            TANGENT_key = mapper.get("TANGENT", "")
+            _tv0 = (next(iter(vertex_data[TANGENT_key].values()), None)
+                    if TANGENT_key and vertex_data.get(TANGENT_key) else None)
+            _ndiag = [round(v, 3) for v in _nv0[:3]] if _nv0 else []
+            _tdiag = [round(v, 3) for v in _tv0[:3]] if _tv0 else []
+            print("[normals diag] nrm_v0=%s  tan_v0=%s" % (_ndiag, _tdiag))
+
             normal_values      = reorder_triangle_corners(value_dict[NORMAL])
             transformed_normals = [transform_unreal_vector(v) for v in normal_values]
             normals = [str(v) for values in transformed_normals for v in values]
@@ -2667,6 +2678,10 @@ def prepare_export(pyrenderdoc, data):
         reference them as ATTRIBUTE0, ATTRIBUTE1, etc.  This helper creates
         bidirectional aliases so VS-Input export finds data regardless of
         which convention the mapper uses.
+
+        Also adds common semantic-name fallbacks so Unity (POSITION, NORMAL,
+        TEXCOORD0 …) and Godot (VERTEX, UV …) presets work with Vulkan
+        captures even though the table only shows _inputN columns.
         """
         if data is None:
             return data, attr_list
@@ -2688,6 +2703,36 @@ def prepare_export(pyrenderdoc, data):
                         added[alias] = data[k]
                 except ValueError:
                     pass
+
+        # ── Semantic-name fallbacks for Unity / Godot / D3D presets ──────
+        # Vulkan captures only expose _inputN / ATTRIBUTE{N} names.  When the
+        # mapper uses semantic names (POSITION, NORMAL, TEXCOORD0 …), look
+        # for them in the location-ordered data.  Location 0 is always
+        # Position, 1 = Tangent, 2 = Normal in Unreal's Vulkan layout.
+        _SEM_FALLBACKS = [
+            ("POSITION",  ["_input0", "ATTRIBUTE0"]),
+            ("VERTEX",    ["_input0", "ATTRIBUTE0"]),   # Godot
+            ("SV_Position",["_input0","ATTRIBUTE0"]),
+            ("NORMAL",    ["_input2", "ATTRIBUTE2"]),
+            ("TANGENT",   ["_input1", "ATTRIBUTE1"]),
+            ("BINORMAL",  ["_input3", "ATTRIBUTE3"]),
+            ("TEXCOORD0", ["_input3", "ATTRIBUTE3", "_input4", "ATTRIBUTE4"]),
+            ("TEXCOORD1", ["_input4", "ATTRIBUTE4", "_input5", "ATTRIBUTE5"]),
+            ("UV",        ["_input3", "ATTRIBUTE3", "_input4", "ATTRIBUTE4"]),
+            ("UV2",       ["_input4", "ATTRIBUTE4", "_input5", "ATTRIBUTE5"]),
+            ("COLOR",     ["_input5", "ATTRIBUTE5", "_input6", "ATTRIBUTE6"]),
+            ("COLOR0",    ["_input5", "ATTRIBUTE5", "_input6", "ATTRIBUTE6"]),
+        ]
+        _all_data = dict(data)
+        _all_data.update(added)
+        for _sem, _cands in _SEM_FALLBACKS:
+            if _sem in _all_data:
+                continue   # already exists
+            for _c in _cands:
+                if _c in _all_data:
+                    added[_sem] = _all_data[_c]
+                    _all_data[_sem] = _all_data[_c]
+                    break
         if added:
             data.update(added)
             if attr_list is not None:
