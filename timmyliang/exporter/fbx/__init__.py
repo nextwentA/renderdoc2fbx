@@ -2279,7 +2279,8 @@ def _build_settings_mapper(settings):
         mapper[key] = settings.value(key, "")
 
     mapper["ENGINE"]                 = settings.value("Engine",               "unity")
-    mapper["MESH_MODE"]              = settings.value("MeshMode",             "VS Input")
+    mapper["EXPORT_VSIN"]            = settings.value("ExportVSIn",           "true")  == "true"
+    mapper["EXPORT_VSOUT"]           = settings.value("ExportVSOut",          "false") == "true"
     mapper["EXPORT_FORMAT"]          = settings.value("ExportFormat",         "FBX")
     mapper["FLIP_U"]                 = settings.value("FlipU",  "false") == "true"
     mapper["FLIP_V"]                 = settings.value("FlipV",  "true")  == "true"
@@ -2495,14 +2496,17 @@ def _batch_eid_export(eids, out_dir, mapper, pyrenderdoc, info_list):
       1. SetFrameEvent to navigate the replay to that draw call.
       2. Read VS Input vertex data from GPU (_read_vsin_attrs_from_gpu).
       3. Convert per-vertex → per-corner, add aliases.
-      4. Write FBX (or OBJ) to  out_dir/eid_NNNNN/eid_NNNNN.fbx
+      4. Write FBX/OBJ per selected mode (VS Input / VS Output / both).
       5. Export textures & shaders to same sub-directory.
 
     After all exports the original event is restored so the RenderDoc
     UI doesn't get stuck on the last exported EID.
     """
-    export_fmt = mapper.get("EXPORT_FORMAT", "FBX")
-    ext        = ".obj" if export_fmt == "OBJ" else ".fbx"
+    export_fmt  = mapper.get("EXPORT_FORMAT", "FBX")
+    ext         = ".obj" if export_fmt == "OBJ" else ".fbx"
+    export_vsin  = mapper.get("EXPORT_VSIN",  True)
+    export_vsout = mapper.get("EXPORT_VSOUT", False)
+    both         = export_vsin and export_vsout
 
     # ── Save current EID so we can restore the UI after batch ────────────
     _orig_eid = [None]
@@ -2521,8 +2525,7 @@ def _batch_eid_export(eids, out_dir, mapper, pyrenderdoc, info_list):
             pass
 
         eid_mapper = dict(mapper)
-        eid_mapper["MESH_MODE"] = "VS Input"
-        eid_mapper["FBX_NAME"]  = eid_name
+        eid_mapper["FBX_NAME"] = eid_name
 
         per_info   = []
         per_errors = []
@@ -2534,25 +2537,46 @@ def _batch_eid_export(eids, out_dir, mapper, pyrenderdoc, info_list):
                     _eid=eid, _mapper=eid_mapper, _dir=eid_dir,
                     _name=eid_name, _ext=ext,
                     _info=per_info, _errs=per_errors,
-                    _res=_result):
+                    _res=_result,
+                    _do_vsin=export_vsin, _do_vsout=export_vsout, _both=both):
             try:
                 ctrl.SetFrameEvent(_eid, True)
 
-                # Read VS Input attributes from GPU
+                # Read VS Input attributes from GPU (needed for both modes)
                 _attr_data, _nidxs = _read_vsin_attrs_from_gpu(_mapper, _info, ctrl)
                 if not _attr_data or not _nidxs:
                     _errs.append("EID %d: no vertex data from GPU" % _eid)
                     return
 
-                # Convert to per-corner data dict and alias
+                # Convert to per-corner data dict + aliases
                 _data, _alist = _alias_vsin_data(_attr_data, _nidxs)
 
-                # Write mesh file
-                _fbx_path = os.path.join(_dir, _name + _ext)
-                if _ext == ".obj":
-                    export_obj(_fbx_path, _mapper, _data, _alist, ctrl)
-                else:
-                    export_fbx(_fbx_path, _mapper, _data, _alist, ctrl)
+                # ── VS Input export ────────────────────────────────────
+                if _do_vsin:
+                    _vsin_path = os.path.join(_dir,
+                        (_name + "_vsin" if _both else _name) + _ext)
+                    _vm = dict(_mapper)
+                    _vm["MESH_MODE"] = "VS Input"
+                    _vm["FBX_NAME"]  = os.path.basename(
+                        os.path.splitext(_vsin_path)[0])
+                    if _ext == ".obj":
+                        export_obj(_vsin_path, _vm, _data, _alist, ctrl)
+                    else:
+                        export_fbx(_vsin_path, _vm, _data, _alist, ctrl)
+
+                # ── VS Output export ───────────────────────────────────
+                if _do_vsout:
+                    _vsout_path = os.path.join(_dir,
+                        (_name + "_vsout" if _both else _name) + _ext)
+                    _vom = dict(_mapper)
+                    _vom["MESH_MODE"] = "VS Output"
+                    _vom["FBX_NAME"]  = os.path.basename(
+                        os.path.splitext(_vsout_path)[0])
+                    _verrs = []
+                    _export_vsout_fbx(_vsout_path, _vom, _info, _verrs,
+                                      _data, _alist, ctrl)
+                    if _verrs:
+                        _errs.append("vsout: " + _verrs[0][:60])
 
                 _res[0] = True
 
@@ -2834,8 +2858,13 @@ def prepare_export(pyrenderdoc, data):
     if not _accepted:
         return
 
-    mesh_mode     = dialog.mapper.get("MESH_MODE", "VS Input") or "VS Input"
+    export_vsin   = dialog.mapper.get("EXPORT_VSIN",   True)
+    export_vsout  = dialog.mapper.get("EXPORT_VSOUT",  False)
     export_format = dialog.mapper.get("EXPORT_FORMAT", "FBX")
+
+    if not export_vsin and not export_vsout:
+        manager.ErrorDialog("请至少勾选一种模式 (VS Input / VS Output)", "Error")
+        return
 
     # Choose file extension based on selected format
     if export_format == "OBJ":
@@ -2845,10 +2874,14 @@ def prepare_export(pyrenderdoc, data):
     if not save_path:
         return
 
-    save_dir = os.path.dirname(save_path)
-    fbx_name = os.path.basename(os.path.splitext(save_path)[0])
+    save_dir  = os.path.dirname(save_path)
+    save_base = os.path.splitext(save_path)[0]          # path without extension
+    save_ext  = os.path.splitext(save_path)[1] or (".obj" if export_format == "OBJ" else ".fbx")
+    fbx_name  = os.path.basename(save_base)
     dialog.mapper["FBX_NAME"] = fbx_name
     current = time.time()
+
+    both = export_vsin and export_vsout   # both modes selected → add suffixes
 
     fbx_info   = []
     fbx_errors = []
@@ -2933,43 +2966,61 @@ def prepare_export(pyrenderdoc, data):
                 attr_list = set(attr_list) | set(added.keys())
         return data, attr_list
 
-    if mesh_mode == "VS Input":
-        data, attr_list = _collect_mesh_data(main_window)
-        if data is None:
-            manager.ErrorDialog(
-                "Mesh data table not found for VS Input mode.",
-                "Error",
-            )
-            return
-        data, attr_list = _add_input_aliases(data, attr_list)
-        print("elapsed time unpack: %s" % (time.time() - current))
-        _run_mesh_export(save_path, dialog.mapper, data, attr_list,
-                         pyrenderdoc, fbx_info, fbx_errors)
-    else:
-        # VS Output: also read VS Input table for attribute pass-through
+    # ── Collect VS Input table data (shared for both modes) ──────────────
+    vsin_data, vsin_attr_list = _collect_mesh_data(main_window)
+
+    last_exported_path = None
+
+    # ── VS Input export ───────────────────────────────────────────────────
+    if export_vsin:
+        vsin_path = (save_base + "_vsin" + save_ext) if both else save_path
+        vsin_name = os.path.basename(os.path.splitext(vsin_path)[0])
+        if vsin_data is None:
+            manager.ErrorDialog("Mesh data table not found for VS Input mode.", "Error")
+            if not export_vsout:
+                return
+        else:
+            _data, _alist = _add_input_aliases(vsin_data, vsin_attr_list)
+            _vsin_mapper  = dict(dialog.mapper)
+            _vsin_mapper["MESH_MODE"] = "VS Input"
+            _vsin_mapper["FBX_NAME"]  = vsin_name
+            print("elapsed time unpack: %s" % (time.time() - current))
+            _run_mesh_export(vsin_path, _vsin_mapper, _data, _alist,
+                             pyrenderdoc, fbx_info, fbx_errors)
+            last_exported_path = vsin_path
+
+    # ── VS Output export ──────────────────────────────────────────────────
+    if export_vsout:
+        vsout_path = (save_base + "_vsout" + save_ext) if both else save_path
+        vsout_name = os.path.basename(os.path.splitext(vsout_path)[0])
         need_vsin = any(dialog.mapper.get(k, True) for k in (
             "VSOUT_INCLUDE_VSIN_UV", "VSOUT_INCLUDE_VSIN_UV2",
             "VSOUT_INCLUDE_VSIN_NORMAL", "VSOUT_INCLUDE_VSIN_TANGENT",
             "VSOUT_INCLUDE_VSIN_BINORMAL", "VSOUT_INCLUDE_VSIN_COLOR",
         ))
-        if need_vsin:
-            vs_in_data, vs_in_attr_list = _collect_mesh_data(main_window)
+        _vs_mapper = dict(dialog.mapper)
+        _vs_mapper["MESH_MODE"] = "VS Output"
+        _vs_mapper["FBX_NAME"]  = vsout_name
+        _vsout_errors = []
+        _run_mesh_export(vsout_path, _vs_mapper,
+                         vsin_data if need_vsin else None,
+                         vsin_attr_list if need_vsin else None,
+                         pyrenderdoc, fbx_info, _vsout_errors)
+        if _vsout_errors:
+            manager.ErrorDialog("VS Output export failed:\n" +
+                                 "\n".join(_vsout_errors), "Error")
+            if not export_vsin:
+                return
         else:
-            vs_in_data, vs_in_attr_list = None, None
-        _run_mesh_export(save_path, dialog.mapper, vs_in_data, vs_in_attr_list,
-                         pyrenderdoc, fbx_info, fbx_errors)
-        if fbx_errors:
-            manager.ErrorDialog(
-                "VS Output export failed:\n" + "\n".join(fbx_errors), "Error"
-            )
-            return
+            last_exported_path = vsout_path
 
     tex_in, tex_out, shaders, shader_errs = _run_secondary_exports(
         save_dir, dialog.mapper, pyrenderdoc
     )
 
-    if os.path.exists(save_path):
-        msg = _build_success_msg(save_path, dialog.mapper, fbx_info,
+    _show_path = last_exported_path or save_path
+    if os.path.exists(_show_path):
+        msg = _build_success_msg(_show_path, dialog.mapper, fbx_info,
                                  tex_in, tex_out, shaders, shader_errs)
         os.startfile(save_dir)
         manager.MessageDialog(msg, "Done!")
@@ -3006,30 +3057,38 @@ def prepare_quick_export(pyrenderdoc, data):
     fbx_name = os.path.basename(os.path.splitext(save_path)[0])
     mapper["FBX_NAME"] = fbx_name
 
-    main_window = pyrenderdoc.GetMainWindow().Widget()
-    mesh_mode   = mapper.get("MESH_MODE", "VS Input")
-    fbx_info    = []
-    fbx_errors  = []
+    main_window  = pyrenderdoc.GetMainWindow().Widget()
+    export_vsin  = mapper.get("EXPORT_VSIN",  True)
+    export_vsout = mapper.get("EXPORT_VSOUT", False)
+    both         = export_vsin and export_vsout
+    save_base    = os.path.splitext(save_path)[0]
+    save_ext     = os.path.splitext(save_path)[1] or (".obj" if export_format == "OBJ" else ".fbx")
+    fbx_info     = []
+    fbx_errors   = []
 
-    if mesh_mode == "VS Input":
-        data, attr_list = _collect_mesh_data(main_window)
-        if data is None:
-            manager.ErrorDialog("Mesh data table not found.", "Error")
-            return
-        _run_mesh_export(save_path, mapper, data, attr_list,
+    vsin_data, vsin_attr_list = _collect_mesh_data(main_window)
+
+    if export_vsin and vsin_data is not None:
+        vsin_path = (save_base + "_vsin" + save_ext) if both else save_path
+        _vm = dict(mapper)
+        _vm["MESH_MODE"] = "VS Input"
+        _vm["FBX_NAME"]  = os.path.basename(os.path.splitext(vsin_path)[0])
+        _run_mesh_export(vsin_path, _vm, vsin_data, vsin_attr_list,
                          pyrenderdoc, fbx_info, fbx_errors)
-    else:
+
+    if export_vsout:
+        vsout_path = (save_base + "_vsout" + save_ext) if both else save_path
         need_vsin = any(mapper.get(k, True) for k in (
             "VSOUT_INCLUDE_VSIN_UV", "VSOUT_INCLUDE_VSIN_UV2",
             "VSOUT_INCLUDE_VSIN_NORMAL", "VSOUT_INCLUDE_VSIN_TANGENT",
             "VSOUT_INCLUDE_VSIN_BINORMAL", "VSOUT_INCLUDE_VSIN_COLOR",
         ))
-        if need_vsin:
-            vs_in_data, vs_in_attr_list = _collect_mesh_data(main_window)
-            vs_in_data, vs_in_attr_list = _add_input_aliases(vs_in_data, vs_in_attr_list)
-        else:
-            vs_in_data, vs_in_attr_list = None, None
-        _run_mesh_export(save_path, mapper, vs_in_data, vs_in_attr_list,
+        _vom = dict(mapper)
+        _vom["MESH_MODE"] = "VS Output"
+        _vom["FBX_NAME"]  = os.path.basename(os.path.splitext(vsout_path)[0])
+        _run_mesh_export(vsout_path, _vom,
+                         vsin_data if need_vsin else None,
+                         vsin_attr_list if need_vsin else None,
                          pyrenderdoc, fbx_info, fbx_errors)
         if fbx_errors:
             manager.ErrorDialog(
@@ -3041,8 +3100,12 @@ def prepare_quick_export(pyrenderdoc, data):
         save_dir, mapper, pyrenderdoc
     )
 
-    if os.path.exists(save_path):
-        msg = _build_success_msg(save_path, mapper, fbx_info,
+    _show = (save_base + ("_vsin" if both and export_vsin else
+                          ("_vsout" if export_vsout else "")) + save_ext)
+    if not os.path.exists(_show):
+        _show = save_path
+    if os.path.exists(_show):
+        msg = _build_success_msg(_show, mapper, fbx_info,
                                  tex_in, tex_out, shaders, shader_errs)
         os.startfile(save_dir)
         manager.MessageDialog(msg, "Quick Export Done!")

@@ -266,11 +266,12 @@ class QueryDialog(object):
                                         self._on_engine_changed)
         self._add_row(grid, r, "Engine", self.engine_combo); r += 1
 
-        # ── Mesh mode ──────────────────────────────────────────────────
-        saved_mode      = self.settings.value("MeshMode", "VS Input")
-        self.mode_combo = self._combo(self.MODE_OPTIONS, saved_mode,
-                                      self._on_mode_changed)
-        self._add_row(grid, r, "Mesh Mode", self.mode_combo); r += 1
+        # ── Mesh mode — two independent checkboxes ─────────────────────
+        _mode_items = [
+            ("vsin_check",  "ExportVSIn",  "VS Input",  "_on_vsin_check",  "true"),
+            ("vsout_check", "ExportVSOut", "VS Output", "_on_vsout_check", "false"),
+        ]
+        self._add_n_per_row(grid, r, _mode_items, n=2); r += 1
 
         # ── Export format ──────────────────────────────────────────────
         saved_fmt        = self.settings.value("ExportFormat", "FBX")
@@ -420,8 +421,11 @@ class QueryDialog(object):
     def _on_engine_changed(self, ctx, widget, text):
         self._apply_template(text)
 
-    def _on_mode_changed(self, ctx, widget, text):
-        self.settings.setValue("MeshMode", text)
+    def _on_vsin_check(self, ctx, widget, checked):
+        self.settings.setValue("ExportVSIn",  "true" if checked else "false")
+
+    def _on_vsout_check(self, ctx, widget, checked):
+        self.settings.setValue("ExportVSOut", "true" if checked else "false")
 
     def _on_export_format_changed(self, ctx, widget, text):
         self.settings.setValue("ExportFormat", text)
@@ -506,9 +510,10 @@ class QueryDialog(object):
             self.mapper[key] = m.GetWidgetText(edit)
 
         # General export options
-        self.mapper["ENGINE"]      = self.settings.value("Engine",     "unity")
-        self.mapper["MESH_MODE"]   = self.settings.value("MeshMode",   "VS Input")
-        self.mapper["EXPORT_FORMAT"]= self.settings.value("ExportFormat","FBX")
+        self.mapper["ENGINE"]        = self.settings.value("Engine",      "unity")
+        self.mapper["EXPORT_VSIN"]   = m.IsWidgetChecked(self.vsin_check)
+        self.mapper["EXPORT_VSOUT"]  = m.IsWidgetChecked(self.vsout_check)
+        self.mapper["EXPORT_FORMAT"] = self.settings.value("ExportFormat", "FBX")
         # VS Output pass-through attributes
         self.mapper["VSOUT_INCLUDE_VSIN_UV"]      = m.IsWidgetChecked(self.vsout_uv_check)
         self.mapper["VSOUT_INCLUDE_VSIN_UV2"]     = m.IsWidgetChecked(self.vsout_uv2_check)
