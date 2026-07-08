@@ -237,6 +237,13 @@ class QueryDialog(object):
                            self.settings.value("ExportSkin", "false") == "true")
         self._add_row(grid, r, "Export Skin Weights", self.export_skin_check); r += 1
 
+        # ── Batch EID input ────────────────────────────────────────────────
+        self.batch_eids_edit = m.CreateTextBox(False, self._on_batch_eids)
+        _saved_eids = self.settings.value("BatchEIDs", "")
+        if _saved_eids:
+            m.SetWidgetText(self.batch_eids_edit, _saved_eids)
+        self._add_row(grid, r, "批量EID (如:100,200-210)", self.batch_eids_edit); r += 1
+
         # ── Attribute mapping fields ───────────────────────────────────
         self.button_dict = {}
         for key, label_text in self.edit_config:
@@ -392,6 +399,9 @@ class QueryDialog(object):
     def _on_export_skin(self, ctx, widget, checked):
         self.settings.setValue("ExportSkin", "true" if checked else "false")
 
+    def _on_batch_eids(self, ctx, widget, text):
+        self.settings.setValue("BatchEIDs", text)
+
     def _on_flip_u(self, ctx, widget, checked):
         self.settings.setValue("FlipU", "true" if checked else "false")
 
@@ -457,6 +467,7 @@ class QueryDialog(object):
         self.mapper["VSOUT_INCLUDE_VSIN_COLOR"]   = m.IsWidgetChecked(self.vsout_color_check)
         self.mapper["BAKE_WORLD_SPACE"]           = m.IsWidgetChecked(self.bake_world_check)
         self.mapper["EXPORT_SKIN"]                = m.IsWidgetChecked(self.export_skin_check)
+        self.mapper["BATCH_EIDS"]                 = m.GetWidgetText(self.batch_eids_edit)
         self.mapper["FLIP_U"] = m.IsWidgetChecked(self.flip_u_check)
         self.mapper["FLIP_V"] = m.IsWidgetChecked(self.flip_v_check)
 

@@ -2307,6 +2307,7 @@ def _build_settings_mapper(settings):
     mapper["VSOUT_INCLUDE_VSIN_COLOR"]   = settings.value("VSOutIncludeVSInColor",   "true") == "true"
     mapper["BAKE_WORLD_SPACE"]           = settings.value("BakeWorldSpace",           "false") == "true"
     mapper["EXPORT_SKIN"]                = settings.value("ExportSkin",                "false") == "true"
+    mapper["BATCH_EIDS"]                 = settings.value("BatchEIDs",                 "")
     return mapper
 
 
@@ -2394,6 +2395,176 @@ def _build_success_msg(save_path, mapper, fbx_info,
         msg += "\n\nShader export: no stages enabled (checked: %s)" % (enabled or "none")
 
     return msg
+
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Batch EID helpers
+# ---------------------------------------------------------------------------
+
+def _parse_eids(text):
+    """Parse "100,200-210,300" → sorted unique list [100,200,201,...,210,300]."""
+    result = []
+    for part in text.replace(" ", "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            result.extend(range(int(a), int(b) + 1))
+        else:
+            result.append(int(part))
+    return sorted(set(result))
+
+
+def _alias_vsin_data(attr_data, vsin_nidxs):
+    """Convert per-vertex GPU attr_data + index list into the per-corner
+    data dict that ``export_fbx`` / ``export_obj`` expect.
+
+    Also adds _inputN ↔ ATTRIBUTE{N} bidirectional aliases and common
+    semantic-name fallbacks (POSITION, VERTEX, TEXCOORD0, UV …).
+
+    Returns (data, attr_list).
+    """
+    n_fc = len(vsin_nidxs)
+    data = {"IDX": list(vsin_nidxs)}
+    for attr_name, per_vert in attr_data.items():
+        data[attr_name] = [
+            list(per_vert[vsin_nidxs[i]]) if 0 <= vsin_nidxs[i] < len(per_vert)
+            else [0.0, 0.0, 0.0]
+            for i in range(n_fc)
+        ]
+
+    # _inputN ↔ ATTRIBUTE{N} bidirectional aliases
+    added = {}
+    for k in list(data.keys()):
+        if k.startswith("_input"):
+            try:
+                n = int(k[len("_input"):])
+                alias = "ATTRIBUTE%d" % n
+                if alias not in data:
+                    added[alias] = data[k]
+            except ValueError:
+                pass
+        elif k.startswith("ATTRIBUTE"):
+            try:
+                n = int(k[len("ATTRIBUTE"):])
+                alias = "_input%d" % n
+                if alias not in data:
+                    added[alias] = data[k]
+            except ValueError:
+                pass
+    data.update(added)
+
+    # Semantic-name fallbacks (Unity/Godot presets)
+    _all = data
+    for _sem, _cands in [
+        ("POSITION",   ["_input0", "ATTRIBUTE0"]),
+        ("VERTEX",     ["_input0", "ATTRIBUTE0"]),
+        ("SV_Position",["_input0", "ATTRIBUTE0"]),
+        ("TEXCOORD0",  ["_input3", "ATTRIBUTE3", "_input4", "ATTRIBUTE4"]),
+        ("TEXCOORD1",  ["_input4", "ATTRIBUTE4", "_input5", "ATTRIBUTE5"]),
+        ("UV",         ["_input3", "ATTRIBUTE3", "_input4", "ATTRIBUTE4"]),
+        ("UV2",        ["_input4", "ATTRIBUTE4", "_input5", "ATTRIBUTE5"]),
+        ("COLOR",      ["_input5", "ATTRIBUTE5", "_input6", "ATTRIBUTE6"]),
+        ("COLOR0",     ["_input5", "ATTRIBUTE5", "_input6", "ATTRIBUTE6"]),
+    ]:
+        if _sem in _all:
+            continue
+        for _c in _cands:
+            if _c in _all:
+                data[_sem] = _all[_c]
+                _all = data
+                break
+
+    attr_list = [k for k in data if k != "IDX"]
+    return data, attr_list
+
+
+def _batch_eid_export(eids, out_dir, mapper, pyrenderdoc, info_list):
+    """Export VS Input mesh + textures + shaders for each EID.
+
+    For each EID in *eids*:
+      1. SetFrameEvent to navigate the replay to that draw call.
+      2. Read VS Input vertex data from GPU (_read_vsin_attrs_from_gpu).
+      3. Convert per-vertex → per-corner, add aliases.
+      4. Write FBX (or OBJ) to  out_dir/eid_NNNNN/eid_NNNNN.fbx
+      5. Export textures & shaders to same sub-directory.
+    """
+    export_fmt = mapper.get("EXPORT_FORMAT", "FBX")
+    ext        = ".obj" if export_fmt == "OBJ" else ".fbx"
+
+    for eid in eids:
+        eid_name = "eid_%05d" % eid
+        eid_dir  = os.path.join(out_dir, eid_name)
+        try:
+            os.makedirs(eid_dir)
+        except OSError:
+            pass
+
+        eid_mapper = dict(mapper)
+        eid_mapper["MESH_MODE"] = "VS Input"
+        eid_mapper["FBX_NAME"]  = eid_name
+
+        per_info   = []
+        per_errors = []
+
+        # Collect result from inside BlockInvoke
+        _result = [None]
+
+        def _do_one(ctrl,
+                    _eid=eid, _mapper=eid_mapper, _dir=eid_dir,
+                    _name=eid_name, _ext=ext,
+                    _info=per_info, _errs=per_errors,
+                    _res=_result):
+            try:
+                ctrl.SetFrameEvent(_eid, True)
+
+                # Read VS Input attributes from GPU
+                _attr_data, _nidxs = _read_vsin_attrs_from_gpu(_mapper, _info, ctrl)
+                if not _attr_data or not _nidxs:
+                    _errs.append("EID %d: no vertex data from GPU" % _eid)
+                    return
+
+                # Convert to per-corner data dict and alias
+                _data, _alist = _alias_vsin_data(_attr_data, _nidxs)
+
+                # Write mesh file
+                _fbx_path = os.path.join(_dir, _name + _ext)
+                if _ext == ".obj":
+                    export_obj(_fbx_path, _mapper, _data, _alist, ctrl)
+                else:
+                    export_fbx(_fbx_path, _mapper, _data, _alist, ctrl)
+
+                _res[0] = True
+
+            except Exception:
+                import traceback as _tb
+                _errs.append(_tb.format_exc()[-200:])
+
+        try:
+            pyrenderdoc.Replay().BlockInvoke(_do_one)
+        except Exception as _e:
+            info_list.append("EID %d: BlockInvoke failed: %s" % (eid, _e))
+            continue
+
+        if per_errors:
+            info_list.append("EID %d: ERROR — %s" % (eid, per_errors[0][:80]))
+            continue
+
+        if not _result[0]:
+            info_list.append("EID %d: skipped (no data)" % eid)
+            continue
+
+        # Export textures / shaders (each uses its own BlockInvoke internally)
+        tex_in, tex_out, shd, shd_err = _run_secondary_exports(
+            eid_dir, eid_mapper, pyrenderdoc)
+
+        info_list.append("EID %d: OK  mesh+tex(%d)+shd(%d)%s" % (
+            eid, len(tex_in), len(shd),
+            (" ERR:" + shd_err[0][:40]) if shd_err else ""))
+        if per_info:
+            info_list.append("  [%s]" % per_info[-1])
 
 
 # ---------------------------------------------------------------------------
@@ -2643,50 +2814,37 @@ def prepare_export(pyrenderdoc, data):
     fbx_info   = []
     fbx_errors = []
 
-    # ── Detect multi-draw-call batch mode ────────────────────────────────────
-    # If the user selected >1 event in the Event Browser, offer to merge them.
-    _selected_eids = []
-    try:
-        _sel_evts = pyrenderdoc.GetSelectedEvents()
-        if _sel_evts and len(_sel_evts) > 1:
-            _selected_eids = [int(e) for e in _sel_evts]
-    except Exception:
-        pass
-
-    if len(_selected_eids) > 1 and mesh_mode == "VS Output":
-        # Ask user before running batch
-        _batch_msg = ("检测到 %d 个选中的 draw call。\n合并导出为单个 FBX？\n\n"
-                      "EID: %s …" % (
-                          len(_selected_eids),
-                          ", ".join(str(e) for e in _selected_eids[:8])))
-        if manager.QuestionDialog(_batch_msg, "Batch Export"):
-            _do_batch_merge(save_path, dialog.mapper, _selected_eids,
-                            pyrenderdoc, fbx_info, fbx_errors, main_window)
-            if fbx_errors:
-                manager.ErrorDialog(
-                    "Batch export failed:\n" + "\n".join(fbx_errors), "Error")
-                return
-            tex_in, tex_out, shaders, shader_errs = _run_secondary_exports(
-                save_dir, dialog.mapper, pyrenderdoc)
-            if os.path.exists(save_path):
-                msg = _build_success_msg(save_path, dialog.mapper, fbx_info,
-                                         tex_in, tex_out, shaders, shader_errs)
-                os.startfile(save_dir)
-                manager.MessageDialog(msg, "Done!")
+    # ── Batch EID mode: user typed EIDs in the dialog ────────────────────────
+    _batch_eids_str = dialog.mapper.get("BATCH_EIDS", "").strip()
+    if _batch_eids_str:
+        try:
+            _eids = _parse_eids(_batch_eids_str)
+        except Exception as _pe:
+            manager.ErrorDialog("EID 格式错误: %s\n请用逗号和短横线，如: 100,200-210" % _pe, "Error")
             return
+        if not _eids:
+            manager.ErrorDialog("没有解析到有效 EID", "Error")
+            return
+        # Re-use the save-file dialog to get the output DIRECTORY
+        _out_path = manager.SaveFileName(
+            "选择批量输出目录 (文件名随意，取其所在目录)", "", "*.fbx")
+        if not _out_path:
+            return
+        _out_dir    = os.path.dirname(_out_path)
+        _batch_info = []
+        _batch_eid_export(_eids, _out_dir, dialog.mapper, pyrenderdoc, _batch_info)
+        os.startfile(_out_dir)
+        manager.MessageDialog(
+            "批量导出完成  (%d EIDs)\n\n%s" % (
+                len(_eids), "\n".join(_batch_info[-30:])),
+            "Done!")
+        return
 
     def _add_input_aliases(data, attr_list):
-        """Add _inputN ↔ ATTRIBUTE{N} aliases so both naming conventions work.
+        """Add _inputN ↔ ATTRIBUTE{N} aliases and semantic-name fallbacks.
 
-        Vulkan-based RenderDoc captures use location-based names (_input0,
-        _input1, …) in the Qt Mesh Viewer table.  Unreal Engine presets
-        reference them as ATTRIBUTE0, ATTRIBUTE1, etc.  This helper creates
-        bidirectional aliases so VS-Input export finds data regardless of
-        which convention the mapper uses.
-
-        Also adds common semantic-name fallbacks so Unity (POSITION, NORMAL,
-        TEXCOORD0 …) and Godot (VERTEX, UV …) presets work with Vulkan
-        captures even though the table only shows _inputN columns.
+        Vulkan captures use _inputN names; Unreal/Unity/Godot presets use
+        ATTRIBUTE{N}, POSITION, VERTEX etc.  This helper bridges the gap.
         """
         if data is None:
             return data, attr_list
@@ -2709,27 +2867,22 @@ def prepare_export(pyrenderdoc, data):
                 except ValueError:
                     pass
 
-        # ── Semantic-name fallbacks for Unity / Godot / D3D presets ──────
-        # Vulkan captures only expose _inputN / ATTRIBUTE{N} names.  When the
-        # mapper uses semantic names (POSITION, NORMAL, TEXCOORD0 …), look
-        # for them in the location-ordered data.  Location 0 is always
-        # Position, 1 = Tangent, 2 = Normal in Unreal's Vulkan layout.
         _SEM_FALLBACKS = [
-            ("POSITION",  ["_input0", "ATTRIBUTE0"]),
-            ("VERTEX",    ["_input0", "ATTRIBUTE0"]),   # Godot
-            ("SV_Position",["_input0","ATTRIBUTE0"]),
-            ("TEXCOORD0", ["_input3", "ATTRIBUTE3", "_input4", "ATTRIBUTE4"]),
-            ("TEXCOORD1", ["_input4", "ATTRIBUTE4", "_input5", "ATTRIBUTE5"]),
-            ("UV",        ["_input3", "ATTRIBUTE3", "_input4", "ATTRIBUTE4"]),
-            ("UV2",       ["_input4", "ATTRIBUTE4", "_input5", "ATTRIBUTE5"]),
-            ("COLOR",     ["_input5", "ATTRIBUTE5", "_input6", "ATTRIBUTE6"]),
-            ("COLOR0",    ["_input5", "ATTRIBUTE5", "_input6", "ATTRIBUTE6"]),
+            ("POSITION",   ["_input0", "ATTRIBUTE0"]),
+            ("VERTEX",     ["_input0", "ATTRIBUTE0"]),
+            ("SV_Position",["_input0", "ATTRIBUTE0"]),
+            ("TEXCOORD0",  ["_input3", "ATTRIBUTE3", "_input4", "ATTRIBUTE4"]),
+            ("TEXCOORD1",  ["_input4", "ATTRIBUTE4", "_input5", "ATTRIBUTE5"]),
+            ("UV",         ["_input3", "ATTRIBUTE3", "_input4", "ATTRIBUTE4"]),
+            ("UV2",        ["_input4", "ATTRIBUTE4", "_input5", "ATTRIBUTE5"]),
+            ("COLOR",      ["_input5", "ATTRIBUTE5", "_input6", "ATTRIBUTE6"]),
+            ("COLOR0",     ["_input5", "ATTRIBUTE5", "_input6", "ATTRIBUTE6"]),
         ]
         _all_data = dict(data)
         _all_data.update(added)
         for _sem, _cands in _SEM_FALLBACKS:
             if _sem in _all_data:
-                continue   # already exists
+                continue
             for _c in _cands:
                 if _c in _all_data:
                     added[_sem] = _all_data[_c]
