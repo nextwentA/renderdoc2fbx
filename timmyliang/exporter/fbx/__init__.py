@@ -2490,11 +2490,22 @@ def _batch_eid_export(eids, out_dir, mapper, pyrenderdoc, info_list):
       3. Convert per-vertex → per-corner, add aliases.
       4. Write FBX (or OBJ) to  out_dir/eid_NNNNN/eid_NNNNN.fbx
       5. Export textures & shaders to same sub-directory.
+
+    After all exports the original event is restored so the RenderDoc
+    UI doesn't get stuck on the last exported EID.
     """
     export_fmt = mapper.get("EXPORT_FORMAT", "FBX")
     ext        = ".obj" if export_fmt == "OBJ" else ".fbx"
 
-    for eid in eids:
+    # ── Save current EID so we can restore the UI after batch ────────────
+    _orig_eid = [None]
+    try:
+        _orig_eid[0] = pyrenderdoc.CurEvent()
+    except Exception:
+        pass
+
+    try:
+      for eid in eids:
         eid_name = "eid_%05d" % eid
         eid_dir  = os.path.join(out_dir, eid_name)
         try:
@@ -2565,6 +2576,16 @@ def _batch_eid_export(eids, out_dir, mapper, pyrenderdoc, info_list):
             (" ERR:" + shd_err[0][:40]) if shd_err else ""))
         if per_info:
             info_list.append("  [%s]" % per_info[-1])
+
+    finally:
+        # ── Restore the original event so the RenderDoc UI doesn't stay ──
+        # stuck on the last exported EID (which may have no mesh data).
+        if _orig_eid[0] is not None:
+            try:
+                pyrenderdoc.Replay().BlockInvoke(
+                    lambda ctrl, e=_orig_eid[0]: ctrl.SetFrameEvent(e, True))
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
