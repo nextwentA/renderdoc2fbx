@@ -887,8 +887,9 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
         has_ib   = idx_list is not None
         if not has_ib:
             idx_list = list(range(len(clip_pos)))
+        n_fc = len(idx_list)   # face corners — must be defined before GPU attr read
         info_list.append("index_buf=%s  faces=%d" % (
-            "yes" if has_ib else "no (sequential)", len(idx_list) // 3))
+            "yes" if has_ib else "no (sequential)", n_fc // 3))
 
         polygons = [~idx if i % 3 == 2 else idx for i, idx in enumerate(idx_list)]
 
