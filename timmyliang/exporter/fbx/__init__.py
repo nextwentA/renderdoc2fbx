@@ -822,15 +822,34 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
             vsin_idxs    = vs_in_data.get("IDX", [])
             vsin_attrs   = vs_in_attr_list or set()
             n_fc         = len(idx_list)          # face corners
-            min_vsin_idx = min(vsin_idxs) if vsin_idxs else 0
+            min_vsin_idx = min(int(v) for v in vsin_idxs) if vsin_idxs else 0
 
             # Unique-vertex lookup (0-based keys) — used only for UV / UV2
             vsin_vdata = defaultdict(dict)
             for row, vidx in enumerate(vsin_idxs):
-                nvidx = vidx - min_vsin_idx
+                nvidx = int(vidx) - min_vsin_idx
                 for attr in (UV, UV2):
                     if attr and attr in vsin_attrs and nvidx not in vsin_vdata[attr]:
                         vsin_vdata[attr][nvidx] = vs_in_data[attr][row]
+
+            # ── Normalized VS Input vertex indices per face corner ─────────────
+            # CRITICAL: use VS Input IDX, NOT idx_list from VS Output IB.
+            #
+            # RenderDoc stores VS Output in *expanded* form (no index buffer):
+            # one vertex slot per draw index, so idx_list falls back to
+            # [0, 1, 2, 3, 4, 5, ...].  But vsin_vdata[UV] is keyed by
+            # *unique* vertex index (e.g. only 4 keys for a mesh with 4 unique
+            # verts drawn 6 times).  Using sequential idx_list would address UV
+            # slots that don't exist and produce completely wrong UV mapping.
+            #
+            # VS Input IDX column contains the original vertex index for every
+            # draw index (the same value the hardware uses to fetch from the VBO).
+            # Normalizing it (subtract minimum) gives the correct 0-based key
+            # into vsin_vdata[UV] for each face corner.
+            _n = min(n_fc, len(vsin_idxs))
+            vsin_nidxs = [int(vsin_idxs[i]) - min_vsin_idx for i in range(_n)]
+            if len(vsin_nidxs) < n_fc:          # safety padding
+                vsin_nidxs.extend([0] * (n_fc - len(vsin_nidxs)))
 
             def _xform3(vals):
                 if ENGINE != "unreal":
@@ -851,7 +870,7 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
                     for _, vals in sorted(vsin_vdata[UV].items())
                     for dim, v in enumerate(vals[:2])
                 ]
-                uvi = ",".join(str(i) for i in idx_list)
+                uvi = ",".join(str(i) for i in vsin_nidxs)  # VS Input vertex idx, NOT idx_list
                 layer_uv = """
                     LayerElementUV: 0 {
                         Version: 101
@@ -883,7 +902,7 @@ def _export_vsout_fbx(save_path, mapper, info_list, err_list,
                     for _, vals in sorted(vsin_vdata[UV2].items())
                     for dim, v in enumerate(vals[:2])
                 ]
-                uvi2 = ",".join(str(i) for i in idx_list)
+                uvi2 = ",".join(str(i) for i in vsin_nidxs)  # VS Input vertex idx, NOT idx_list
                 layer_uv2 = """
                     LayerElementUV: 1 {
                         Version: 101
