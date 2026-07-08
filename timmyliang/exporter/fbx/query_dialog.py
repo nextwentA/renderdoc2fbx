@@ -133,22 +133,32 @@ class QueryDialog(object):
         self.mqt.AddGridWidget(grid, row, 1, widget, 1, 1)
 
     def _add_two_per_row(self, grid, row, items_2col):
-        """Place two labeled-checkbox items side-by-side in one row (2 per row)."""
+        """Compatibility wrapper — calls _add_n_per_row with n=2."""
         self._add_n_per_row(grid, row, items_2col, n=2)
 
-    def _add_n_per_row(self, grid, row, items, n=2):
-        """Place up to *n* labeled-checkbox items side-by-side in one row.
+    def _add_n_per_row(self, grid, outer_row, items, n=2):
+        """Place n checkboxes side-by-side, constrained to the same width as
+        col 1 (the Engine combo box column) so the row never exceeds that width.
 
-        Each item is a tuple (attr_name, setting_key, label, cb_name, default).
-        Layout: col 0=label0, col 1=check0, col 2=label1, col 3=check1, …
+        Each item: (attr_name, setting_key, label, cb_name, default).
+
+        Strategy:
+          • Create a sub-grid and place it at (outer_row, col 1).
+          • Set the label text directly on each checkbox so no extra label
+            column is needed — Qt distributes n equal-width columns.
+          • Col 0 of the outer row is left blank so the left edge aligns
+            with the widget column of normal label→widget rows.
         """
         m = self.mqt
+        sub = m.CreateGridContainer()
         for ci, (attr_name, setting_key, label, cb_name, default) in enumerate(items[:n]):
             chk = m.CreateCheckbox(getattr(self, cb_name))
             m.SetWidgetChecked(chk, self.settings.value(setting_key, default) == "true")
+            m.SetWidgetText(chk, label)   # text on the checkbox itself
             setattr(self, attr_name, chk)
-            m.AddGridWidget(grid, row, ci * 2,     self._label(label), 1, 1)
-            m.AddGridWidget(grid, row, ci * 2 + 1, chk,                1, 1)
+            m.AddGridWidget(sub, 0, ci, chk, 1, 1)
+        # Place sub-grid in col 1 → same width budget as Engine combo
+        m.AddGridWidget(grid, outer_row, 1, sub, 1, 1)
 
     def _section(self, grid, row, title):
         self.mqt.AddGridWidget(grid, row, 0, self._label("-- %s --" % title), 1, 2)
@@ -272,32 +282,20 @@ class QueryDialog(object):
         # ── UV Flip ────────────────────────────────────────────────────
         self._section(grid, r, "UV Options"); r += 1
 
-        self.flip_u_check = m.CreateCheckbox(self._on_flip_u)
-        m.SetWidgetChecked(self.flip_u_check,
-            self.settings.value("FlipU", "false") == "true")
-        self.flip_v_check = m.CreateCheckbox(self._on_flip_v)
-        m.SetWidgetChecked(self.flip_v_check,
-            self.settings.value("FlipV", "true") == "true")
-        m.AddGridWidget(grid, r, 0, self._label("Flip U"), 1, 1)
-        m.AddGridWidget(grid, r, 1, self.flip_u_check, 1, 1)
-        m.AddGridWidget(grid, r, 2, self._label("Flip V"), 1, 1)
-        m.AddGridWidget(grid, r, 3, self.flip_v_check, 1, 1)
-        r += 1
+        _flip_items = [
+            ("flip_u_check", "FlipU", "Flip U", "_on_flip_u", "false"),
+            ("flip_v_check", "FlipV", "Flip V", "_on_flip_v", "true"),
+        ]
+        self._add_n_per_row(grid, r, _flip_items, n=2); r += 1
 
         # ── Texture ────────────────────────────────────────────────────
         self._section(grid, r, "Texture Export"); r += 1
 
-        self.tex_check = m.CreateCheckbox(self._on_tex_check)
-        m.SetWidgetChecked(self.tex_check,
-            self.settings.value("ExportTextures", "true") == "true")
-        self.tex_output_check = m.CreateCheckbox(self._on_tex_output_check)
-        m.SetWidgetChecked(self.tex_output_check,
-            self.settings.value("ExportOutputTextures", "true") == "true")
-        m.AddGridWidget(grid, r, 0, self._label("Export Inputs"),  1, 1)
-        m.AddGridWidget(grid, r, 1, self.tex_check,                1, 1)
-        m.AddGridWidget(grid, r, 2, self._label("Export Outputs"), 1, 1)
-        m.AddGridWidget(grid, r, 3, self.tex_output_check,         1, 1)
-        r += 1
+        _tex_items = [
+            ("tex_check",        "ExportTextures",       "Export Inputs",  "_on_tex_check",        "true"),
+            ("tex_output_check", "ExportOutputTextures", "Export Outputs", "_on_tex_output_check", "true"),
+        ]
+        self._add_n_per_row(grid, r, _tex_items, n=2); r += 1
 
         saved_tex_fmt      = self.settings.value("TexFormat", "PNG")
         self.tex_fmt_combo = self._combo(self.FMT_OPTIONS, saved_tex_fmt,
