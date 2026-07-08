@@ -2813,7 +2813,15 @@ def prepare_export(pyrenderdoc, data):
 
     mqt    = manager.GetMiniQtHelper()
     dialog = QueryDialog(mqt, available_attrs=available_attrs)
-    if not mqt.ShowWidgetAsDialog(dialog.init_ui()):
+    _dlg_widget = dialog.init_ui()
+
+    # QueryDialog now returns a raw PySide2 QDialog (for scroll support).
+    # ShowWidgetAsDialog doesn't handle QDialog correctly — use exec() instead.
+    if hasattr(_dlg_widget, 'exec'):
+        _accepted = bool(_dlg_widget.exec())
+    else:
+        _accepted = bool(mqt.ShowWidgetAsDialog(_dlg_widget))
+    if not _accepted:
         return
 
     mesh_mode     = dialog.mapper.get("MESH_MODE", "VS Input") or "VS Input"
