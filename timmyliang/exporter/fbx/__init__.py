@@ -766,25 +766,69 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
                 # half-float "e" is already a Python float — no conversion needed
                 verts.append(raw)
 
-            # ── Auto-detect half-float UV mislabeled as float32 ───────────────
-            # VK_FORMAT_R16G16_SFLOAT is 2 bytes/component, but RenderDoc may
-            # report compByteWidth=4 (treating the 4-byte pair as one float32).
-            # Reading 2×float32 from 4-byte half-float data gives values ~1e-5:
-            # the IEEE-754 half-float bytes pattern is tiny when reinterpreted
-            # as float32.  Detect this and re-read as float16.
-            if key in ("UV", "UV2") and fc == "f" and comp == 2 and len(verts) > 5:
-                sample = [abs(v) for e in verts[:20] for v in e if v == v]  # filter NaN
-                if sample and max(sample) < 0.01:
-                    hf = []
-                    for vi in range(nv):
-                        base = vi * stride + off
-                        if base + comp * 2 > len(vb_data):  # 2 half-floats = 4 bytes
-                            break
-                        hf.append(list(struct.unpack_from("<2e", vb_data, base)))
-                    if hf:
-                        verts = hf
-                        info_list.append("  %s: half-float16 auto-corrected (float32 max was %.2e)" % (
-                            key, max(sample)))
+            # ── For UV/UV2: verify values look like UV, scan if not ────────────
+            # "Collapsed to a point" happens when:
+            # (a) offset is wrong (reads from padding → all zeros), or
+            # (b) format is half-float but API reports width=4 (float32) → tiny
+            #
+            # Detection: if max absolute value across first 20 verts < 0.01,
+            # scan the ENTIRE vertex stride for float16 / float32 pairs whose
+            # values are in the plausible UV range [0.001, 10] with variation.
+            if key in ("UV", "UV2") and comp == 2:
+                _sample = [abs(v) for e in verts[:20] for v in e
+                           if v == v and not (v != v)]  # filter NaN
+                _max_v  = max(_sample) if _sample else 0.0
+
+                if _max_v < 0.01:
+                    # Current read gives no real UV data — scan vertex stride
+                    info_list.append("  %s: values near-zero (max=%.2e), scanning stride…" % (key, _max_v))
+                    _best_score, _best_verts, _best_desc = -1, None, ""
+
+                    for _scan_off in range(0, stride - 1, 2):
+                        for _sfmt, _sbpc in (("e", 2), ("f", 4)):  # half first, float32 second
+                            _need = comp * _sbpc
+                            if _scan_off + _need > stride:
+                                continue
+                            _sv = []
+                            for _vi in range(min(30, nv)):
+                                _b = _vi * stride + _scan_off
+                                if _b + _need > len(vb_data):
+                                    break
+                                _sv.append(list(struct.unpack_from(
+                                    "<%d%s" % (comp, _sfmt), vb_data, _b)))
+                            if len(_sv) < 5:
+                                continue
+                            _vals = [v for _e in _sv for v in _e]
+                            _in_range = sum(1 for v in _vals if 0.0 <= abs(v) <= 10.0)
+                            _nonzero  = sum(1 for v in _vals if abs(v) > 0.001)
+                            _vmax     = max(abs(v) for v in _vals)
+                            # Good UV: mostly in [0,10], significant variation, not all same
+                            _unique   = len(set(round(v, 3) for v in _vals))
+                            _score    = _in_range + _nonzero * 2 + min(_unique, 20)
+                            if (0.001 <= _vmax <= 10.0 and
+                                    _nonzero >= len(_vals) * 0.3 and
+                                    _in_range >= len(_vals) * 0.8 and
+                                    _score > _best_score):
+                                _best_score = _score
+                                _best_desc  = "off=%d fmt=%s" % (_scan_off, _sfmt)
+                                # Store parameters, not full data (read all later)
+                                _best_verts = (_scan_off, _sfmt, _sbpc)
+
+                    if _best_verts is not None:
+                        _scan_off, _sfmt, _sbpc = _best_verts
+                        _new_verts = []
+                        for _vi in range(nv):
+                            _b = _vi * stride + _scan_off
+                            if _b + comp * _sbpc > len(vb_data):
+                                break
+                            _new_verts.append(list(struct.unpack_from(
+                                "<%d%s" % (comp, _sfmt), vb_data, _b)))
+                        if _new_verts:
+                            verts = _new_verts
+                            info_list.append("  %s: scan found UV at %s (score=%d)" % (
+                                key, _best_desc, _best_score))
+                    else:
+                        info_list.append("  %s: scan found nothing plausible in stride" % key)
 
             attr_data[attr_name] = verts
             info_list.append("  %s=%r -> OK  %d verts  comp=%d  byteOff=%d  fmt=%s" % (
