@@ -637,12 +637,16 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
         min_idx   = min(idx_raw) if idx_raw else 0
         vsin_nidxs = [v - min_idx for v in idx_raw]
 
-        # ── Collect ALL bound vertex buffers (Vulkan/DX12 can have many) ──────
-        # Different attributes (position vs UV) often live in separate VB bindings
-        # (each with its own stride).  We enumerate them all so the UV scan can
-        # search beyond the primary binding that fmt_in describes.
-        all_vb = []   # list of (raw_bytes_after_offset, stride_per_vertex)
-        all_vb.append((vb_data, stride))   # binding 0 = primary (fmt_in)
+        # ── Collect ALL vertex buffers: VS Input primary + VS Output buffer ────
+        # GetVertexBuffers() is unavailable in some RenderDoc versions.
+        # However, the VS Output vertex buffer IS always accessible and the
+        # vertex shader typically passes UV through as an output attribute
+        # (TEXCOORD0 etc.).  We add the VS Output buffer as a secondary scan
+        # source so we can find UV even when the VS Input VB has all-zero UV.
+        all_vb = []   # list of (raw_bytes, stride)
+        all_vb.append((vb_data, stride))   # primary VS Input buffer
+
+        # Try GetVertexBuffers() (newer RenderDoc)
         try:
             state0  = controller.GetPipelineState()
             vb_list = state0.GetVertexBuffers()
@@ -653,9 +657,9 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
                 if not rid or rid == rd.ResourceId.Null() or bstr <= 0:
                     continue
                 if rid == fmt_in.vertexResourceId:
-                    continue  # already in all_vb[0]
+                    continue
                 try:
-                    raw_bi = bytes(controller.GetBufferData(rid, 0, 0))
+                    raw_bi  = bytes(controller.GetBufferData(rid, 0, 0))
                     data_bi = raw_bi[boff:] if boff < len(raw_bi) else raw_bi
                     nv_bi   = len(data_bi) // bstr
                     if nv_bi >= nv // 2:   # plausible vertex count
@@ -666,6 +670,35 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
                     pass
         except Exception as e:
             info_list.append("vsin_gpu: GetVertexBuffers() skipped: %s" % str(e))
+
+        # Try to add VS Output vertex buffer as an additional scan source.
+        # The vertex shader typically passes UV through to its outputs, so
+        # the UV should be present in the VS Output buffer even when it's
+        # missing or mis-offset in the VS Input buffer.
+        try:
+            fmt_out_scan = controller.GetPostVSData(0, 0, rd.MeshDataStage.VSOut)
+            if (fmt_out_scan.numIndices > 0 and
+                    fmt_out_scan.vertexResourceId != rd.ResourceId.Null()):
+                raw_vs = bytes(controller.GetBufferData(
+                    fmt_out_scan.vertexResourceId, 0, 0))
+                vs_off = fmt_out_scan.vertexByteOffset
+                vs_str = fmt_out_scan.vertexByteStride
+                vb_vs  = raw_vs[vs_off:] if vs_off < len(raw_vs) else raw_vs
+                nv_vs  = len(vb_vs) // vs_str if vs_str > 0 else 0
+                if nv_vs >= nv // 2:
+                    all_vb.append((vb_vs, vs_str))
+                    info_list.append("vsin_gpu: added VS Output VB stride=%d verts=%d" % (
+                        vs_str, nv_vs))
+        except Exception as e:
+            info_list.append("vsin_gpu: VS Output VB: %s" % str(e))
+
+        # Hex dump of first vertex for diagnostics (bytes 0-63 of VB0)
+        if vb_data and stride > 0:
+            _hdump = " ".join("%02X" % vb_data[i] for i in range(min(stride, 64)))
+            info_list.append("vsin_gpu v0_hex: " + _hdump)
+            _fdump = " ".join("@%d:%.3f" % (i*4, struct.unpack_from("<f", vb_data, i*4)[0])
+                              for i in range(min(stride//4, 16)))
+            info_list.append("vsin_gpu v0_f32: " + _fdump)
 
         # ── Vertex input layout → byte-offset map ─────────────────────────────
         state   = controller.GetPipelineState()
@@ -822,7 +855,10 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
 
                     for _vbi, (_vbd, _vbstr) in enumerate(all_vb):
                         _nvb = len(_vbd) // _vbstr if _vbstr > 0 else 0
-                        for _scan_off in range(0, _vbstr - 1, 2):
+                        # For VS Output buffer (last entry), skip SV_Position
+                        # (first 16 bytes = float4 clip-space position).
+                        _start_off = 16 if _vbi == len(all_vb) - 1 and _vbi > 0 else 0
+                        for _scan_off in range(_start_off, _vbstr - 1, 2):
                             for _sfmt, _sbpc in (("e", 2), ("f", 4)):
                                 _need = comp * _sbpc
                                 if _scan_off + _need > _vbstr:
