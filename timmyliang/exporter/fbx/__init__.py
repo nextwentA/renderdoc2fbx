@@ -855,9 +855,15 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
 
                     for _vbi, (_vbd, _vbstr) in enumerate(all_vb):
                         _nvb = len(_vbd) // _vbstr if _vbstr > 0 else 0
-                        # For VS Output buffer (last entry), skip SV_Position
-                        # (first 16 bytes = float4 clip-space position).
-                        _start_off = 16 if _vbi == len(all_vb) - 1 and _vbi > 0 else 0
+                        # For primary VB (vbi=0): skip known attribute region
+                        # (offsets 0..nat_cum-1 are position/tangent/normal, NOT UV).
+                        # For VS Output buffer: skip SV_Position (first 16 bytes).
+                        if _vbi == 0:
+                            _start_off = nat_cum      # scan only the "extra" region
+                        elif _vbi == len(all_vb) - 1:
+                            _start_off = 16           # skip SV_Position in VS Out
+                        else:
+                            _start_off = 0
                         for _scan_off in range(_start_off, _vbstr - 1, 2):
                             for _sfmt, _sbpc in (("e", 2), ("f", 4)):
                                 _need = comp * _sbpc
@@ -877,19 +883,27 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
                                 _nonzero  = sum(1 for v in _vals if abs(v) > 0.001)
                                 _vmax     = max(abs(v) for v in _vals)
                                 _unique   = len(set(round(v, 3) for v in _vals))
-                                # Reject if u+v sums are pinned near 1.0 (bone weights)
-                                _sums     = [_sv[i][0] + _sv[i][1] for i in range(len(_sv))]
-                                _sum_near1 = sum(1 for s in _sums if abs(s - 1.0) < 0.05)
-                                if _sum_near1 > len(_sums) * 0.7:
-                                    continue   # bone-weight pattern
-                                # Require genuine 2D spread (not all on a line)
+                                # Bone-weight detection: u+v must be BOTH pinned near
+                                # 1.0 (>95%) AND very low variance — normal UV can
+                                # have u+v≈1 coincidentally, but bone weights ALWAYS
+                                # sum to exactly 1 with near-zero variance.
+                                _sums = [_sv[i][0] + _sv[i][1] for i in range(len(_sv))]
+                                _mean_s = sum(_sums) / max(len(_sums), 1)
+                                _var_s  = sum((s - _mean_s)**2 for s in _sums) / max(len(_sums), 1)
+                                _n1 = sum(1 for s in _sums if abs(s - 1.0) < 0.03)
+                                if _n1 > len(_sums) * 0.95 and _var_s < 0.005:
+                                    continue   # almost certainly bone weights
+                                # Require genuine 2D spread in both axes
                                 _us = [_sv[i][0] for i in range(len(_sv))]
-                                _vs = [_sv[i][1] for i in range(len(_sv))]
+                                _vs_v = [_sv[i][1] for i in range(len(_sv))]
                                 _urange = max(_us) - min(_us) if _us else 0
-                                _vrange = max(_vs) - min(_vs) if _vs else 0
-                                if _urange < 0.05 or _vrange < 0.05:
+                                _vrange = max(_vs_v) - min(_vs_v) if _vs_v else 0
+                                if _urange < 0.02 or _vrange < 0.02:
                                     continue   # degenerate (collapsed axis)
-                                _score = _in_range + _nonzero * 2 + min(_unique, 20)
+                                # Bonus for all-positive values (UV coords are ≥0)
+                                _all_pos = sum(1 for v in _vals if v >= 0)
+                                _score = (_in_range + _nonzero * 2 + min(_unique, 20)
+                                          + (_all_pos // 2))
                                 if (0.001 <= _vmax <= 10.0 and
                                         _nonzero >= len(_vals) * 0.3 and
                                         _in_range >= len(_vals) * 0.7 and
