@@ -391,39 +391,14 @@ def export_fbx(save_path, mapper, data, attr_list, controller):
             """
 
         def run_uv(self):
-            # Auto-select best UV0 among comp=2 attributes.
-            # In Vulkan Unreal games, UV0 is at _input3/ATTRIBUTE3 (location 3)
-            # while _input4/ATTRIBUTE4 (location 4) is UV1.  Try all comp=2
-            # candidates and pick the one with the most UV-like values.
-            _uv_key = UV
-            _best_score = 0
-            for _ck in ([UV] if UV else []) + ["ATTRIBUTE3", "ATTRIBUTE4",
-                                                "_input3", "_input4"]:
-                _cdata = vertex_data.get(_ck)
-                if not _cdata:
-                    continue
-                # Each value should be a 2-element sequence
-                _sample = list(_cdata.values())[:30]
-                if not (_sample and hasattr(_sample[0], '__len__') and len(_sample[0]) >= 2):
-                    continue
-                _vals = [abs(v) for vals in _sample for v in list(vals)[:2] if v == v]
-                _mx = max(_vals) if _vals else 0
-                _nz = sum(1 for v in _vals if v > 0.001)
-                if not (0.001 <= _mx <= 10.0 and _nz >= len(_vals) * 0.3):
-                    continue
-                _sc = _nz + len(set(round(v, 2) for v in _vals))
-                if _sc > _best_score:
-                    _best_score = _sc
-                    _uv_key = _ck
-
-            if not vertex_data.get(_uv_key):
+            if not vertex_data.get(UV):
                 return
             uv_index_values = reorder_triangle_corners(idx_list)
             uvs_indices     = ",".join([str(idx) for idx in uv_index_values])
             uvs = [
                 str((1 - v if flip_u else v) if i == 0 else (1 - v if flip_v else v))
-                for idx, values in sorted(vertex_data[_uv_key].items())
-                for i, v in enumerate(values[:2])
+                for idx, values in sorted(vertex_data[UV].items())
+                for i, v in enumerate(values)
             ]
             ARGS["LayerElementUV"] = """
                 LayerElementUV: 0 {
@@ -1982,7 +1957,6 @@ def prepare_export(pyrenderdoc, data):
                 "Error",
             )
             return
-        data, attr_list = _add_input_aliases(data, attr_list)
         print("elapsed time unpack: %s" % (time.time() - current))
         _run_mesh_export(save_path, dialog.mapper, data, attr_list,
                          pyrenderdoc, fbx_info, fbx_errors)
