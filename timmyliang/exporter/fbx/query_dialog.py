@@ -137,17 +137,12 @@ class QueryDialog(object):
         self._add_n_per_row(grid, row, items_2col, n=2)
 
     def _add_n_per_row(self, grid, outer_row, items, n=2):
-        """Place n checkboxes side-by-side, constrained to the same width as
-        col 1 (the Engine combo box column) so the row never exceeds that width.
+        """Place n checkboxes side-by-side, left-aligned, width capped at
+        the Engine combo box (col 0 → col 1 right edge, colspan=2).
 
         Each item: (attr_name, setting_key, label, cb_name, default).
-
-        Strategy:
-          • Create a sub-grid and place it at (outer_row, col 1).
-          • Set the label text directly on each checkbox so no extra label
-            column is needed — Qt distributes n equal-width columns.
-          • Col 0 of the outer row is left blank so the left edge aligns
-            with the widget column of normal label→widget rows.
+        Label text is set directly on the checkbox so no extra column is used.
+        n equal-width columns are distributed by Qt inside the sub-grid.
         """
         m = self.mqt
         sub = m.CreateGridContainer()
@@ -157,8 +152,9 @@ class QueryDialog(object):
             m.SetWidgetText(chk, label)   # text on the checkbox itself
             setattr(self, attr_name, chk)
             m.AddGridWidget(sub, 0, ci, chk, 1, 1)
-        # Place sub-grid in col 1 → same width budget as Engine combo
-        m.AddGridWidget(grid, outer_row, 1, sub, 1, 1)
+        # colspan=2 → starts at col 0 (left edge) and ends at col 1 right edge
+        # This matches "Engine" label+combo total width exactly.
+        m.AddGridWidget(grid, outer_row, 0, sub, 1, 2)
 
     def _section(self, grid, row, title):
         self.mqt.AddGridWidget(grid, row, 0, self._label("-- %s --" % title), 1, 2)
@@ -193,10 +189,20 @@ class QueryDialog(object):
     # ------------------------------------------------------------------
 
     def init_ui(self):
+        from PySide2 import QtWidgets, QtCore
         m           = self.mqt
         self.widget = m.CreateToplevelWidget(self.title, None)
         grid        = m.CreateGridContainer()
-        m.AddWidget(self.widget, grid)
+
+        # Wrap the grid in a vertical scroll area so the dialog stays
+        # compact even as new features are added.
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        scroll.setMinimumHeight(480)
+        scroll.setWidget(grid)   # MiniQtHelper grid IS a PySide2 QWidget
+        m.AddWidget(self.widget, scroll)
 
         r = 0   # row counter
 
