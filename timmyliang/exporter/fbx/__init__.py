@@ -819,6 +819,27 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
                               for i in range(min(stride//4, 16)))
             info_list.append("vsin_gpu v0_f32: " + _fdump)
 
+        # ── All vertex buffer bindings: slot → (bytes, stride, nv) ──────────────
+        # Build this BEFORE reading the layout, so each attribute can be read
+        # from the correct VB binding (split-VB layout: position in slot 0,
+        # normals/UVs in slot 1 etc.).
+        _vb_map = {0: (vb_data, stride, nv)}   # slot 0 = primary from GetPostVSData
+        try:
+            _state0 = controller.GetPipelineState()
+            _vb_list = _state0.GetVertexBuffers()
+            for _bi, _vb_b in enumerate(_vb_list):
+                _rid   = getattr(_vb_b, 'resourceId', None)
+                _boff  = int(getattr(_vb_b, 'byteOffset',  0) or 0)
+                _bstr  = int(getattr(_vb_b, 'byteStride',  0) or 0)
+                if not _rid or _rid == rd.ResourceId.Null() or _bstr <= 0:
+                    continue
+                _raw_b  = bytes(controller.GetBufferData(_rid, 0, 0))
+                _data_b = _raw_b[_boff:] if _boff < len(_raw_b) else _raw_b
+                _nv_b   = len(_data_b) // _bstr
+                _vb_map[_bi] = (_data_b, _bstr, _nv_b)
+        except Exception as _vbe:
+            info_list.append("vsin_gpu: GetVertexBuffers err: %s" % _vbe)
+
         # ── Vertex input layout → byte-offset map ─────────────────────────────
         state   = controller.GetPipelineState()
         va_list = state.GetVertexInputs()
@@ -828,19 +849,27 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
             return getattr(iv[1], 'location', iv[0])
         va_sorted = sorted(enumerate(va_list), key=_va_loc)
 
-        # Collect raw info per slot
-        slot_info = []   # (slot_i, loc, comp, width, reported_off)
+        # Collect raw info per slot, including VB binding slot
+        slot_info = []   # (slot_i, loc, comp, width, reported_off, vb_binding)
         for slot_i, va in va_sorted:
             fmt_va  = getattr(va, 'format', None)
             comp    = getattr(fmt_va, 'compCount',     4) if fmt_va else 4
             width   = getattr(fmt_va, 'compByteWidth', 4) if fmt_va else 4
             rep_off = int(getattr(va, 'byteOffset', 0) or 0)
             loc     = getattr(va, 'location', slot_i)
-            slot_info.append((slot_i, loc, comp, width, rep_off))
+            # VB binding slot — try several possible attribute names
+            vb_slot = getattr(va, 'binding',           None)
+            if vb_slot is None:
+                vb_slot = getattr(va, 'vertexBufferSlot', None)
+            if vb_slot is None:
+                vb_slot = getattr(va, 'inputSlot',        0)
+            vb_slot = int(vb_slot or 0)
+            slot_info.append((slot_i, loc, comp, width, rep_off, vb_slot))
 
         # If ALL reported byteOffsets are 0, the API isn't providing them.
-        # Compute accumulated offsets instead.  Try two strategies and pick the
-        # one whose total matches the vertex stride.
+        # Compute accumulated offsets instead.  Try two strategies per VB slot
+        # (attributes in the same slot share one stride; natural/aligned
+        # selection must be done per-slot).
         any_nonzero = any(si[4] > 0 for si in slot_info)
 
         if any_nonzero:
@@ -848,55 +877,58 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
             computed_offsets = [si[4] for si in slot_info]
             info_list.append("vsin_gpu offsets: api-reported")
         else:
-            # Strategy A: natural (no padding)
-            nat_offs, nat_cum = [], 0
-            for _, _, comp, width, _ in slot_info:
-                nat_offs.append(nat_cum)
-                nat_cum += comp * width
+            # Compute offsets per-VB-slot (split VB: each slot has its own stride).
+            # Group attributes by their VB binding, compute natural/aligned within
+            # each group, then pick the strategy that fits that slot's stride.
+            slot_cums = {}   # vb_slot → running natural offset
+            aln_cums  = {}   # vb_slot → running aligned offset
+            nat_offs  = []
+            aln_offs  = []
+            for _, _, comp, width, _, vb_slot in slot_info:
+                nc = slot_cums.get(vb_slot, 0)
+                ac = aln_cums.get(vb_slot, 0)
+                nat_offs.append(nc)
+                aln_offs.append(ac)
+                slot_cums[vb_slot] = nc + comp * width
+                raw_size = comp * width
+                aln_cums[vb_slot] = ac + (
+                    ((raw_size + 4 * width - 1) // (4 * width)) * (4 * width))
 
-            # Strategy B: float4-aligned (each attribute rounded up to 4-comp boundary)
-            aln_offs, aln_cum = [], 0
-            for _, _, comp, width, _ in slot_info:
-                aln_offs.append(aln_cum)
-                raw = comp * width
-                aligned = ((raw + 4 * width - 1) // (4 * width)) * (4 * width)
-                aln_cum += aligned
-
-            if abs(aln_cum - stride) <= 4:
-                computed_offsets = aln_offs
-                info_list.append("vsin_gpu offsets: float4-aligned  total=%d stride=%d" % (aln_cum, stride))
-            elif abs(nat_cum - stride) <= 4:
-                computed_offsets = nat_offs
-                info_list.append("vsin_gpu offsets: natural  total=%d stride=%d" % (nat_cum, stride))
-            else:
-                # Neither standard strategy fits the stride.
-                # The most common explanation is trailing per-vertex padding:
-                # attributes are packed tightly (natural layout), and the
-                # remainder of the stride is unused space.  As long as
-                # nat_cum <= stride, natural offsets are safe to use.
-                computed_offsets = nat_offs
-                if nat_cum <= stride:
-                    info_list.append("vsin_gpu offsets: natural+pad  nat=%d stride=%d" % (nat_cum, stride))
-                else:
-                    info_list.append("vsin_gpu offsets: FALLBACK nat=%d aln=%d stride=%d" % (nat_cum, aln_cum, stride))
+            # For each VB slot, choose natural vs aligned by comparing with its stride
+            computed_offsets = []
+            _strat_log = {}
+            for i, (_, _, comp, width, _, vb_slot) in enumerate(slot_info):
+                _, _s, _ = _vb_map.get(vb_slot, (vb_data, stride, nv))
+                nat_total = slot_cums.get(vb_slot, 0)
+                aln_total = aln_cums.get(vb_slot, 0)
+                if vb_slot not in _strat_log:
+                    if abs(aln_total - _s) <= 4:
+                        _strat_log[vb_slot] = "aln"
+                    elif abs(nat_total - _s) <= 4:
+                        _strat_log[vb_slot] = "nat"
+                    else:
+                        _strat_log[vb_slot] = "nat+pad"
+                computed_offsets.append(
+                    aln_offs[i] if _strat_log[vb_slot] == "aln" else nat_offs[i])
+            info_list.append("vsin_gpu offsets: per-slot %s" % _strat_log)
 
         # Identify comp=2 slots as UV candidates (hint for user)
         uv_hints = [
-            "_input%d/ATTRIBUTE%d(off%d)" % (loc, loc, computed_offsets[i])
-            for i, (_, loc, comp, _, _) in enumerate(slot_info) if comp == 2
+            "_input%d/ATTRIBUTE%d(off%d,vb%d)" % (loc, loc, computed_offsets[i], vb_slot)
+            for i, (_, loc, comp, _, _, vb_slot) in enumerate(slot_info) if comp == 2
         ]
         if uv_hints:
             info_list.append("vsin_gpu UV_candidates(comp=2): %s" % " ".join(uv_hints))
 
-        layout = {}   # name_variant -> (byteOffset, compCount, compByteWidth, fmtChar)
-        for idx, (slot_i, loc, comp, width, _) in enumerate(slot_info):
+        layout = {}   # name_variant -> (byteOffset, compCount, compByteWidth, fmtChar, vb_slot)
+        for idx, (slot_i, loc, comp, width, _, vb_slot) in enumerate(slot_info):
             off  = computed_offsets[idx]
             # Format char: 4-byte→float, 2-byte→half-float, 1-byte→signed byte
             if   width == 4: fc = "f"
             elif width == 2: fc = "e"   # half-float (Python ≥ 3.6)
             elif width == 1: fc = "b"   # int8 (packed SNORM tangent/normal)
             else:            fc = "f"
-            info = (off, comp, width, fc)
+            info = (off, comp, width, fc, vb_slot)   # 5-tuple incl. vb_slot
 
             # Collect name aliases
             va    = va_sorted[idx][1]
@@ -919,8 +951,9 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
 
         # Show slot details so user can identify UV / Color names
         slot_detail = []
-        for idx, (slot_i, loc, comp, width, _) in enumerate(slot_info):
-            slot_detail.append("loc%d:off%d:comp%d" % (loc, computed_offsets[idx], comp))
+        for idx, (slot_i, loc, comp, width, _, vb_slot) in enumerate(slot_info):
+            slot_detail.append("loc%d:off%d:comp%d:vb%d" % (
+                loc, computed_offsets[idx], comp, vb_slot))
         info_list.append("vsin_gpu slots=[%s]" % " ".join(slot_detail))
         info_list.append("vsin_gpu layout keys=[%s]" %
                          ",".join(sorted(layout.keys())[:14]))
@@ -933,13 +966,15 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
             if attr_name not in layout:
                 info_list.append("  %s=%r -> MISSING (not in layout)" % (key, attr_name))
                 continue
-            off, comp, width, fc = layout[attr_name]
+            off, comp, width, fc, vb_slot = layout[attr_name]
+            # Read from the correct VB binding (split-VB aware)
+            _vbd, _vbstr, _vbnv = _vb_map.get(vb_slot, (vb_data, stride, nv))
             verts = []
-            for vi in range(nv):
-                base = vi * stride + off
-                if base + comp * width > len(vb_data):
+            for vi in range(_vbnv):
+                base = vi * _vbstr + off
+                if base + comp * width > len(_vbd):
                     break
-                raw = list(struct.unpack_from("<%d%s" % (comp, fc), vb_data, base))
+                raw = list(struct.unpack_from("<%d%s" % (comp, fc), _vbd, base))
                 # Normalise packed integer types to float range
                 if fc == "b":          # int8 SNORM → [-1, 1]
                     raw = [v / 127.0 for v in raw]
@@ -1158,25 +1193,26 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
     # By reading every slot here, _alias_vsin_data can later build POSITION from
     # _input0, TEXCOORD0 from _input3, etc. — matching single-export behaviour.
     try:
-        _seen_off_comp = set()   # deduplicate slots that share the same (offset, comp)
-        for _sname, (_soff, _scomp, _swidth, _sfc) in layout.items():
+        _seen_off_vb_comp = set()   # deduplicate slots: (vb_slot, offset, comp)
+        for _sname, (_soff, _scomp, _swidth, _sfc, _svb) in layout.items():
             # Only process the canonical _inputN / ATTRIBUTE{N} names once
             if not (_sname.startswith("_input") or _sname.startswith("ATTRIBUTE")):
                 continue
             if _sname in attr_data:
                 continue                     # already populated by main read loop
-            _dedup_key = (_soff, _scomp)
-            if _dedup_key in _seen_off_comp:
+            _dedup_key = (_svb, _soff, _scomp)
+            if _dedup_key in _seen_off_vb_comp:
                 continue
-            _seen_off_comp.add(_dedup_key)
+            _seen_off_vb_comp.add(_dedup_key)
 
+            _svbd, _svbstr, _svbnv = _vb_map.get(_svb, (vb_data, stride, nv))
             _sverts = []
-            for _vi in range(nv):
-                _base = _vi * stride + _soff
-                if _base + _scomp * _swidth > len(vb_data):
+            for _vi in range(_svbnv):
+                _base = _vi * _svbstr + _soff
+                if _base + _scomp * _swidth > len(_svbd):
                     break
                 _raw = list(struct.unpack_from(
-                    "<%d%s" % (_scomp, _sfc), vb_data, _base))
+                    "<%d%s" % (_scomp, _sfc), _svbd, _base))
                 if   _sfc == "b": _raw = [v / 127.0 for v in _raw]
                 elif _sfc == "B": _raw = [v / 255.0 for v in _raw]
                 _sverts.append(_raw)
@@ -2602,8 +2638,6 @@ def _batch_eid_export(eids, out_dir, mapper, pyrenderdoc, info_list):
     export_vsout = mapper.get("EXPORT_VSOUT", False)
     both         = export_vsin and export_vsout
 
-    main_window = pyrenderdoc.GetMainWindow().Widget()
-
     # ── Save current EID so we can restore the UI after batch ────────────
     _orig_eid = [None]
     try:
@@ -2626,29 +2660,48 @@ def _batch_eid_export(eids, out_dir, mapper, pyrenderdoc, info_list):
         # ── Step 1: navigate to this EID (UI-level, updates Qt table) ────
         # pyrenderdoc.SetEventID fires the same signals as clicking in the
         # Event Browser → Mesh Viewer table is updated synchronously before
-        # the call returns.  BlockInvoke(SetFrameEvent) only updates the
-        # replay-thread state and does NOT update the Qt table.
+        # Navigate + read all vertex data inside one BlockInvoke so the
+        # replay thread is in the correct state for the entire operation.
+        _per_info  = []
+        _per_errs  = []
+        _vsin_data = [None]
+        _vsin_alist= [None]
+
+        def _do_eid(ctrl,
+                    _e=eid, _m=eid_mapper, _d=_vsin_data, _a=_vsin_alist,
+                    _info=_per_info, _errs=_per_errs):
+            try:
+                ctrl.SetFrameEvent(_e, True)
+                _ad, _ni = _read_vsin_attrs_from_gpu(_m, _info, ctrl)
+                if not _ad or not _ni:
+                    _errs.append("no vertex data from GPU")
+                    return
+                _d[0], _a[0] = _alias_vsin_data(_ad, _ni)
+            except Exception:
+                import traceback as _tb
+                _errs.append(_tb.format_exc()[-200:])
+
         try:
-            pyrenderdoc.SetEventID([], eid, eid)
+            pyrenderdoc.Replay().BlockInvoke(_do_eid)
         except Exception as _e:
-            info_list.append("EID %d: SetEventID failed: %s" % (eid, _e))
+            info_list.append("EID %d: BlockInvoke failed: %s" % (eid, _e))
             _cleanup_empty_dir(eid_dir)
             continue
 
-        # ── Step 2: read VS Input from Qt Mesh Viewer table ──────────────
-        # SetEventID above already updated the table synchronously.
-        # This is IDENTICAL to single export (_collect_mesh_data reads the
-        # same table that the user sees, already decoded by RenderDoc).
-        vsin_data, vsin_attr_list = _collect_mesh_data(main_window)
-        if vsin_data:
-            vsin_data, vsin_attr_list = _add_vsin_aliases(vsin_data, vsin_attr_list)
+        if _per_errs:
+            info_list.append("EID %d: ERROR — %s" % (eid, _per_errs[0][:80]))
+            _cleanup_empty_dir(eid_dir)
+            continue
+
+        vsin_data    = _vsin_data[0]
+        vsin_attr_list = _vsin_alist[0]
 
         any_ok = False
 
-        # ── Step 4: VS Input export (export_fbx needs no controller) ─────
+        # ── VS Input export ───────────────────────────────────────────────
         if export_vsin:
             if not vsin_data:
-                info_list.append("EID %d: VS Input — no data in Qt table" % eid)
+                info_list.append("EID %d: VS Input — no data from GPU" % eid)
             else:
                 _vsin_path = os.path.join(eid_dir,
                     (eid_name + "_vsin" if both else eid_name) + ext)
@@ -2664,7 +2717,7 @@ def _batch_eid_export(eids, out_dir, mapper, pyrenderdoc, info_list):
                 except Exception as _xe:
                     info_list.append("EID %d: VS Input write failed: %s" % (eid, _xe))
 
-        # ── Step 5: VS Output export (needs replay thread) ────────────────
+        # ── VS Output export (needs replay thread) ────────────────────────
         if export_vsout:
             _vsout_path = os.path.join(eid_dir,
                 (eid_name + "_vsout" if both else eid_name) + ext)
@@ -2690,7 +2743,7 @@ def _batch_eid_export(eids, out_dir, mapper, pyrenderdoc, info_list):
             _cleanup_empty_dir(eid_dir)
             continue
 
-        # ── Step 6: textures & shaders ────────────────────────────────────
+        # ── Textures & shaders ────────────────────────────────────────────
         tex_in, tex_out, shd, shd_err = _run_secondary_exports(
             eid_dir, eid_mapper, pyrenderdoc)
 
