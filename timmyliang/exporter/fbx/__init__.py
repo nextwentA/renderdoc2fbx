@@ -502,39 +502,27 @@ def export_fbx(save_path, mapper, data, attr_list, controller):
             """
 
         def run_uv(self):
-            if not vertex_data.get(UV):
+            if not value_dict.get(UV):
                 return
-            uv_index_values = reorder_triangle_corners(idx_list)
-            # Build vertex_index → UV-array-position map.
-            # vertex_data[UV] may have non-contiguous keys (e.g. {0,1,3,4} missing 2)
-            # so we cannot use the raw vertex index as the UV array position directly.
-            _sorted_uv_keys = sorted(vertex_data[UV].keys())
-            _uv_pos_map     = {vx: pos for pos, vx in enumerate(_sorted_uv_keys)}
-            uvs_indices     = ",".join([str(_uv_pos_map.get(idx, 0))
-                                        for idx in uv_index_values])
+            # UV is per-face-corner (same as normals): use Direct mapping.
             uvs = [
                 str((1 - v if flip_u else v) if i == 0 else (1 - v if flip_v else v))
-                for vx in _sorted_uv_keys
-                for i, v in enumerate(vertex_data[UV][vx])
+                for values in value_dict[UV]
+                for i, v in enumerate(values)
             ]
             ARGS["LayerElementUV"] = """
                 LayerElementUV: 0 {
                     Version: 101
                     Name: "map1"
                     MappingInformationType: "ByPolygonVertex"
-                    ReferenceInformationType: "IndexToDirect"
+                    ReferenceInformationType: "Direct"
                     UV: *%(uvs_num)s {
                         a: %(uvs)s
                     }
-                    UVIndex: *%(uvs_indices_num)s {
-                        a: %(uvs_indices)s
-                    }
                 }
             """ % {
-                "uvs":             ",".join(uvs),
-                "uvs_num":         len(uvs),
-                "uvs_indices":     uvs_indices,
-                "uvs_indices_num": idx_len,
+                "uvs":     ",".join(uvs),
+                "uvs_num": len(uvs),
             }
             ARGS["LayerElementUVInsert"] = """
                 LayerElement:  {
@@ -544,36 +532,26 @@ def export_fbx(save_path, mapper, data, attr_list, controller):
             """
 
         def run_uv2(self):
-            if not vertex_data.get(UV2):
+            if not value_dict.get(UV2):
                 return
-            uv2_index_values = reorder_triangle_corners(idx_list)
-            _sorted_uv2_keys = sorted(vertex_data[UV2].keys())
-            _uv2_pos_map     = {vx: pos for pos, vx in enumerate(_sorted_uv2_keys)}
-            uvs_indices      = ",".join([str(_uv2_pos_map.get(idx, 0))
-                                         for idx in uv2_index_values])
             uvs = [
                 str((1 - v if flip_u else v) if i == 0 else (1 - v if flip_v else v))
-                for vx in _sorted_uv2_keys
-                for i, v in enumerate(vertex_data[UV2][vx])
+                for values in value_dict[UV2]
+                for i, v in enumerate(values)
             ]
             ARGS["LayerElementUV2"] = """
                 LayerElementUV: 1 {
                     Version: 101
                     Name: "map2"
                     MappingInformationType: "ByPolygonVertex"
-                    ReferenceInformationType: "IndexToDirect"
+                    ReferenceInformationType: "Direct"
                     UV: *%(uvs_num)s {
                         a: %(uvs)s
                     }
-                    UVIndex: *%(uvs_indices_num)s {
-                        a: %(uvs_indices)s
-                    }
                 }
             """ % {
-                "uvs":             ",".join(uvs),
-                "uvs_num":         len(uvs),
-                "uvs_indices":     uvs_indices,
-                "uvs_indices_num": idx_len,
+                "uvs":     ",".join(uvs),
+                "uvs_num": len(uvs),
             }
             ARGS["LayerElementUV2Insert"] = """
                 LayerElement:  {
