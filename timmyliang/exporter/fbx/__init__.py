@@ -350,18 +350,14 @@ def export_fbx(save_path, mapper, data, attr_list, controller):
     idx_list = [idx - min_poly for idx in idx_dict]
     idx_len  = len(idx_list)
 
-    def transform_rx_neg90_mirror_x(values):
-        x, y, z = values[:3]
-        return [-x, z, -y]
-
     def transform_unreal_vector(values):
-        if ENGINE != "unreal":
-            return list(values[:3])
-        return transform_rx_neg90_mirror_x(values)
+        # Export raw vertex-buffer coordinates without any engine-specific
+        # rotation or mirroring.  VS Input positions are already in the
+        # coordinate system stored in the GPU buffer; applying extra transforms
+        # here causes the model to appear rotated/mirrored in the DCC tool.
+        return list(values[:3])
 
     def reorder_triangle_corners(values):
-        if ENGINE != "unreal":
-            return list(values)
         return list(values)
 
     class ProcessHandler(object):
@@ -418,7 +414,7 @@ def export_fbx(save_path, mapper, data, attr_list, controller):
             if not vertex_data.get(BINORMAL):
                 return
             transformed = [transform_unreal_vector(v) for v in value_dict[BINORMAL]]
-            binormals = [str(-v) for values in transformed for v in values]
+            binormals = [str(v) for values in transformed for v in values]
             ARGS["LayerElementBiNormal"] = """
                 LayerElementBinormal: 0 {
                     Version: 101
