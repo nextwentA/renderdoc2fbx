@@ -2623,19 +2623,20 @@ def _batch_eid_export(eids, out_dir, mapper, pyrenderdoc, info_list):
         eid_mapper = dict(mapper)
         eid_mapper["FBX_NAME"] = eid_name
 
-        # ── Step 1: navigate replay to this EID ──────────────────────────
+        # ── Step 1: navigate to this EID (UI-level, updates Qt table) ────
+        # pyrenderdoc.SetEventID fires the same signals as clicking in the
+        # Event Browser → Mesh Viewer table is updated synchronously before
+        # the call returns.  BlockInvoke(SetFrameEvent) only updates the
+        # replay-thread state and does NOT update the Qt table.
         try:
-            pyrenderdoc.Replay().BlockInvoke(
-                lambda ctrl, e=eid: ctrl.SetFrameEvent(e, True))
+            pyrenderdoc.SetEventID([], eid, eid)
         except Exception as _e:
-            info_list.append("EID %d: SetFrameEvent failed: %s" % (eid, _e))
+            info_list.append("EID %d: SetEventID failed: %s" % (eid, _e))
             _cleanup_empty_dir(eid_dir)
             continue
 
-        # ── Step 2: flush Qt events so Mesh Viewer table refreshes ───────
-        _QW.QApplication.processEvents()
-
-        # ── Step 3: read VS Input from Qt Mesh Viewer table ──────────────
+        # ── Step 2: read VS Input from Qt Mesh Viewer table ──────────────
+        # SetEventID above already updated the table synchronously.
         # This is IDENTICAL to single export (_collect_mesh_data reads the
         # same table that the user sees, already decoded by RenderDoc).
         vsin_data, vsin_attr_list = _collect_mesh_data(main_window)
@@ -2705,10 +2706,13 @@ def _batch_eid_export(eids, out_dir, mapper, pyrenderdoc, info_list):
         # ── Restore the original event ────────────────────────────────────
         if _orig_eid[0] is not None:
             try:
-                pyrenderdoc.Replay().BlockInvoke(
-                    lambda ctrl, e=_orig_eid[0]: ctrl.SetFrameEvent(e, True))
+                pyrenderdoc.SetEventID([], _orig_eid[0], _orig_eid[0])
             except Exception:
-                pass
+                try:
+                    pyrenderdoc.Replay().BlockInvoke(
+                        lambda ctrl, e=_orig_eid[0]: ctrl.SetFrameEvent(e, True))
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------
