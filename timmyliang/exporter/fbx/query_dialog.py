@@ -29,16 +29,30 @@ from PySide2 import QtCore
 
 # Map from our internal key to candidate attribute names, ordered by priority.
 # The first candidate found in the available attributes list wins.
+#
+# Vulkan captures use location-based names: _input0, _input1, ...
+# Common Unreal Vulkan layout: loc0=position, loc1=tangent, loc2=normal,
+#   loc3/loc5=UV, loc4/loc6=UV2, loc13=color.
+# Common Unity/DX11 captures: POSITION, NORMAL, TEXCOORD0 …
+# Both sets are listed so the heuristic works for either API.
 _AUTO_DETECT_MAP = {
-    "POSITION": ["POSITION", "SV_Position", "ATTRIBUTE0", "ATTR0", "in_POSITION0"],
-    "NORMAL":   ["NORMAL",   "ATTRIBUTE2",  "ATTR2",      "in_NORMAL0"],
-    "TANGENT":  ["TANGENT",  "ATTRIBUTE1",  "ATTR1",      "in_TANGENT0"],
-    "BINORMAL": ["BINORMAL", "ATTRIBUTE3",  "ATTR3",      "in_BINORMAL0"],
-    "COLOR":    ["COLOR",    "COLOR0",      "ATTRIBUTE13", "ATTR13", "in_COLOR0"],
-    "UV":       ["TEXCOORD0","TEXCOORD",    "UV0",         "UV",
-                 "ATTRIBUTE5", "ATTR5",     "in_TEXCOORD0"],
-    "UV2":      ["TEXCOORD1","UV1",         "UV2",
-                 "ATTRIBUTE6", "ATTR6",     "in_TEXCOORD1"],
+    "POSITION": ["POSITION", "SV_Position",
+                 "ATTRIBUTE0", "ATTR0", "_input0", "in_POSITION0"],
+    "NORMAL":   ["NORMAL",
+                 "ATTRIBUTE2", "ATTR2",  "_input2", "in_NORMAL0"],
+    "TANGENT":  ["TANGENT",
+                 "ATTRIBUTE1", "ATTR1",  "_input1", "in_TANGENT0"],
+    "BINORMAL": ["BINORMAL",
+                 "ATTRIBUTE3", "ATTR3",  "_input3", "in_BINORMAL0"],
+    "COLOR":    ["COLOR",    "COLOR0",
+                 "ATTRIBUTE13", "ATTR13", "_input13",
+                 "ATTRIBUTE5",  "_input5", "in_COLOR0"],
+    "UV":       ["TEXCOORD0", "TEXCOORD", "UV0", "UV",
+                 "ATTRIBUTE5", "ATTR5",   "_input5",
+                 "ATTRIBUTE3", "_input3", "in_TEXCOORD0"],
+    "UV2":      ["TEXCOORD1", "UV1", "UV2",
+                 "ATTRIBUTE6", "ATTR6", "_input6",
+                 "ATTRIBUTE4", "_input4", "in_TEXCOORD1"],
 }
 
 
@@ -529,10 +543,12 @@ class QueryDialog(object):
     def _accept(self, ctx, widget, text):
         m = self.mqt
 
-        # Attribute mapping
+        # Attribute mapping — read current widget value and persist to settings
         self.mapper = {}
         for key, edit in self.button_dict.items():
-            self.mapper[key] = m.GetWidgetText(edit)
+            val = m.GetWidgetText(edit)
+            self.mapper[key] = val
+            self.settings.setValue(key, val)
 
         # General export options
         self.mapper["ENGINE"]        = self.settings.value("Engine",      "unity")
