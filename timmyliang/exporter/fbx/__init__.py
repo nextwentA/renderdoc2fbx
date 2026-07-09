@@ -2512,20 +2512,34 @@ def _cleanup_empty_dir(path):
         pass
 
 def _add_vsin_aliases(data, attr_list):
-    """Module-level alias helper — same logic as the nested _add_input_aliases
-    in prepare_export, but accessible from _batch_eid_export.
+    """Build a complete alias web for vertex attribute names.
 
-    Adds _inputN ↔ ATTRIBUTE{N} bidirectional aliases and semantic-name
-    fallbacks so any engine preset (Unity POSITION, Godot VERTEX, Unreal
-    ATTRIBUTE0 …) resolves correctly against Vulkan _inputN column names.
+    Three layers of aliases are added so that any engine preset
+    (Unity POSITION, Godot VERTEX, Unreal ATTRIBUTE0, Vulkan _input0)
+    can find the data regardless of which name the mapper stores:
+
+    1. Bidirectional _inputN ↔ ATTRIBUTE{N}
+       (e.g. _input0 → ATTRIBUTE0 and vice-versa)
+
+    2. Forward semantic: add semantic name when location-based name exists
+       (e.g. data has _input0 → add POSITION alias)
+
+    3. Reverse semantic: add location-based name when only semantic exists
+       (e.g. data has POSITION but no _input0 → add _input0 alias)
+       This handles switching between captures where column names differ:
+       mapper stored "_input0" (Vulkan capture) → works on a D3D11
+       capture that only has "POSITION".
     """
     if data is None:
         return data, attr_list
+
     added = {}
+
+    # ── 1. Bidirectional _inputN ↔ ATTRIBUTE{N} ──────────────────────────
     for k in list(data.keys()):
         if k.startswith("_input"):
             try:
-                n     = int(k[len("_input"):])
+                n = int(k[len("_input"):])
                 alias = "ATTRIBUTE%d" % n
                 if alias not in data:
                     added[alias] = data[k]
@@ -2533,26 +2547,32 @@ def _add_vsin_aliases(data, attr_list):
                 pass
         elif k.startswith("ATTRIBUTE"):
             try:
-                n     = int(k[len("ATTRIBUTE"):])
+                n = int(k[len("ATTRIBUTE"):])
                 alias = "_input%d" % n
                 if alias not in data:
                     added[alias] = data[k]
             except ValueError:
                 pass
-    _SEM_FALLBACKS = [
-        ("POSITION",   ["_input0", "ATTRIBUTE0"]),
-        ("VERTEX",     ["_input0", "ATTRIBUTE0"]),
-        ("SV_Position",["_input0", "ATTRIBUTE0"]),
-        ("TEXCOORD0",  ["_input3", "ATTRIBUTE3", "_input4", "ATTRIBUTE4"]),
-        ("TEXCOORD1",  ["_input4", "ATTRIBUTE4", "_input5", "ATTRIBUTE5"]),
-        ("UV",         ["_input3", "ATTRIBUTE3", "_input4", "ATTRIBUTE4"]),
-        ("UV2",        ["_input4", "ATTRIBUTE4", "_input5", "ATTRIBUTE5"]),
-        ("COLOR",      ["_input5", "ATTRIBUTE5", "_input6", "ATTRIBUTE6"]),
-        ("COLOR0",     ["_input5", "ATTRIBUTE5", "_input6", "ATTRIBUTE6"]),
-    ]
+
     _all = dict(data)
     _all.update(added)
-    for _sem, _cands in _SEM_FALLBACKS:
+
+    # ── 2. Forward semantic (location → semantic) ─────────────────────────
+    _FWD = [
+        ("POSITION",    ["_input0",  "ATTRIBUTE0"]),
+        ("VERTEX",      ["_input0",  "ATTRIBUTE0"]),
+        ("SV_Position", ["_input0",  "ATTRIBUTE0"]),
+        ("NORMAL",      ["_input2",  "ATTRIBUTE2"]),
+        ("TANGENT",     ["_input1",  "ATTRIBUTE1"]),
+        ("BINORMAL",    ["_input3",  "ATTRIBUTE3"]),
+        ("TEXCOORD0",   ["_input3",  "ATTRIBUTE3",  "_input5", "ATTRIBUTE5"]),
+        ("TEXCOORD1",   ["_input4",  "ATTRIBUTE4",  "_input6", "ATTRIBUTE6"]),
+        ("UV",          ["_input3",  "ATTRIBUTE3",  "_input5", "ATTRIBUTE5"]),
+        ("UV2",         ["_input4",  "ATTRIBUTE4",  "_input6", "ATTRIBUTE6"]),
+        ("COLOR",       ["_input13", "ATTRIBUTE13", "_input5", "ATTRIBUTE5"]),
+        ("COLOR0",      ["_input13", "ATTRIBUTE13", "_input5", "ATTRIBUTE5"]),
+    ]
+    for _sem, _cands in _FWD:
         if _sem in _all:
             continue
         for _c in _cands:
@@ -2560,6 +2580,32 @@ def _add_vsin_aliases(data, attr_list):
                 added[_sem] = _all[_c]
                 _all[_sem]  = _all[_c]
                 break
+
+    # ── 3. Reverse semantic (semantic → location) ─────────────────────────
+    # Handles: mapper stored "_input0" (from a Vulkan capture) but current
+    # data only has "POSITION" (D3D11/Unity capture) — without this step
+    # vertex_data["_input0"] is never populated and no vertices are written.
+    _REV = [
+        # (location-based aliases to add,          semantic names to source from)
+        (["_input0",  "ATTRIBUTE0"],  ["POSITION", "VERTEX", "SV_Position"]),
+        (["_input2",  "ATTRIBUTE2"],  ["NORMAL"]),
+        (["_input1",  "ATTRIBUTE1"],  ["TANGENT"]),
+        (["_input3",  "ATTRIBUTE3"],  ["BINORMAL"]),
+        (["_input13", "ATTRIBUTE13"], ["COLOR", "COLOR0"]),
+    ]
+    for _locs, _sems in _REV:
+        _src = None
+        for _s in _sems:
+            if _s in _all:
+                _src = _all[_s]
+                break
+        if _src is None:
+            continue
+        for _l in _locs:
+            if _l not in _all:
+                added[_l] = _src
+                _all[_l]  = _src
+
     if added:
         data.update(added)
         if attr_list is not None:
@@ -3080,58 +3126,8 @@ def prepare_export(pyrenderdoc, data):
     fbx_errors = []
 
     def _add_input_aliases(data, attr_list):
-        """Add _inputN ↔ ATTRIBUTE{N} aliases and semantic-name fallbacks.
-
-        Vulkan captures use _inputN names; Unreal/Unity/Godot presets use
-        ATTRIBUTE{N}, POSITION, VERTEX etc.  This helper bridges the gap.
-        """
-        if data is None:
-            return data, attr_list
-        added = {}
-        for k in list(data.keys()):
-            if k.startswith("_input"):
-                try:
-                    n     = int(k[len("_input"):])
-                    alias = "ATTRIBUTE%d" % n
-                    if alias not in data:
-                        added[alias] = data[k]
-                except ValueError:
-                    pass
-            elif k.startswith("ATTRIBUTE"):
-                try:
-                    n     = int(k[len("ATTRIBUTE"):])
-                    alias = "_input%d" % n
-                    if alias not in data:
-                        added[alias] = data[k]
-                except ValueError:
-                    pass
-
-        _SEM_FALLBACKS = [
-            ("POSITION",   ["_input0", "ATTRIBUTE0"]),
-            ("VERTEX",     ["_input0", "ATTRIBUTE0"]),
-            ("SV_Position",["_input0", "ATTRIBUTE0"]),
-            ("TEXCOORD0",  ["_input3", "ATTRIBUTE3", "_input4", "ATTRIBUTE4"]),
-            ("TEXCOORD1",  ["_input4", "ATTRIBUTE4", "_input5", "ATTRIBUTE5"]),
-            ("UV",         ["_input3", "ATTRIBUTE3", "_input4", "ATTRIBUTE4"]),
-            ("UV2",        ["_input4", "ATTRIBUTE4", "_input5", "ATTRIBUTE5"]),
-            ("COLOR",      ["_input5", "ATTRIBUTE5", "_input6", "ATTRIBUTE6"]),
-            ("COLOR0",     ["_input5", "ATTRIBUTE5", "_input6", "ATTRIBUTE6"]),
-        ]
-        _all_data = dict(data)
-        _all_data.update(added)
-        for _sem, _cands in _SEM_FALLBACKS:
-            if _sem in _all_data:
-                continue
-            for _c in _cands:
-                if _c in _all_data:
-                    added[_sem] = _all_data[_c]
-                    _all_data[_sem] = _all_data[_c]
-                    break
-        if added:
-            data.update(added)
-            if attr_list is not None:
-                attr_list = set(attr_list) | set(added.keys())
-        return data, attr_list
+        """Delegate to module-level _add_vsin_aliases (same logic, one place)."""
+        return _add_vsin_aliases(data, attr_list)
 
     # ── Collect VS Input table data (shared for both modes) ──────────────
     vsin_data, vsin_attr_list = _collect_mesh_data(main_window)
