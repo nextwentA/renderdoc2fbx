@@ -30,22 +30,28 @@ class MProgressDialog(QtWidgets.QProgressDialog):
         self.setWindowFlags(self.windowFlags())
         self.setWindowModality(QtCore.Qt.WindowModal)
         self.setWindowTitle(status if title else title)
+        self.setMinimumWidth(520)
         bar = QtWidgets.QProgressBar(self)
+        bar.setFixedHeight(22)
         bar.setStyleSheet(
             """
             QProgressBar {
-                color:white;
-                border: 1px solid black;
-                background: gray;
+                color: white;
+                border: 1px solid #2a5a2a;
+                border-radius: 6px;
+                background: #2b2b2b;
+                text-align: center;
+                font-weight: bold;
             }
 
             QProgressBar::chunk {
                 background: QLinearGradient( x1: 0, y1: 0, x2: 1, y2: 0,
-                stop: 0 #78d,
-                stop: 0.4999 #46a,
-                stop: 0.5 #45a,
-                stop: 1 #238 );
-                border: 1px solid black;
+                stop: 0    #1a7a1a,
+                stop: 0.4  #2db52d,
+                stop: 0.5  #28b028,
+                stop: 1    #1a7a1a );
+                border-radius: 5px;
+                border: none;
             }
             """
         )
