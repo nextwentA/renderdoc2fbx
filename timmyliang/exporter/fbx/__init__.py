@@ -304,8 +304,9 @@ def export_fbx(save_path, mapper, data, attr_list, controller):
 
     save_name = os.path.basename(os.path.splitext(save_path)[0])
 
-    idx_dict   = data["IDX"]
-    value_dict = defaultdict(list)
+    # Qt model.data() may return strings; normalise to int so min/sort are numeric.
+    idx_dict    = [int(v) for v in data["IDX"]]
+    value_dict  = defaultdict(list)
     vertex_data = defaultdict(dict)
 
     for i, idx in enumerate(idx_dict):
@@ -419,7 +420,7 @@ def export_fbx(save_path, mapper, data, attr_list, controller):
                 LayerElementBinormal: 0 {
                     Version: 101
                     Name: "map1"
-                    MappingInformationType: "ByVertice"
+                    MappingInformationType: "ByPolygonVertex"
                     ReferenceInformationType: "Direct"
                     Binormals: *%(binormals_num)s {
                         a: %(binormals)s
@@ -429,10 +430,10 @@ def export_fbx(save_path, mapper, data, attr_list, controller):
                     }
                 }
             """ % {
-                "binormals":     ",".join(binormals),
-                "binormals_num": len(binormals),
-                "binormalsW":    ",".join(["1" for _ in range(idx_len)]),
-                "binormalsW_num": idx_len,
+                "binormals":      ",".join(binormals),
+                "binormals_num":  len(binormals),
+                "binormalsW":     ",".join(["1"] * (len(binormals) // 3)),
+                "binormalsW_num": len(binormals) // 3,
             }
             ARGS["LayerElementBiNormalInsert"] = """
                 LayerElement:  {
@@ -504,11 +505,17 @@ def export_fbx(save_path, mapper, data, attr_list, controller):
             if not vertex_data.get(UV):
                 return
             uv_index_values = reorder_triangle_corners(idx_list)
-            uvs_indices     = ",".join([str(idx) for idx in uv_index_values])
+            # Build vertex_index → UV-array-position map.
+            # vertex_data[UV] may have non-contiguous keys (e.g. {0,1,3,4} missing 2)
+            # so we cannot use the raw vertex index as the UV array position directly.
+            _sorted_uv_keys = sorted(vertex_data[UV].keys())
+            _uv_pos_map     = {vx: pos for pos, vx in enumerate(_sorted_uv_keys)}
+            uvs_indices     = ",".join([str(_uv_pos_map.get(idx, 0))
+                                        for idx in uv_index_values])
             uvs = [
                 str((1 - v if flip_u else v) if i == 0 else (1 - v if flip_v else v))
-                for idx, values in sorted(vertex_data[UV].items())
-                for i, v in enumerate(values)
+                for vx in _sorted_uv_keys
+                for i, v in enumerate(vertex_data[UV][vx])
             ]
             ARGS["LayerElementUV"] = """
                 LayerElementUV: 0 {
@@ -540,11 +547,14 @@ def export_fbx(save_path, mapper, data, attr_list, controller):
             if not vertex_data.get(UV2):
                 return
             uv2_index_values = reorder_triangle_corners(idx_list)
-            uvs_indices      = ",".join([str(idx) for idx in uv2_index_values])
+            _sorted_uv2_keys = sorted(vertex_data[UV2].keys())
+            _uv2_pos_map     = {vx: pos for pos, vx in enumerate(_sorted_uv2_keys)}
+            uvs_indices      = ",".join([str(_uv2_pos_map.get(idx, 0))
+                                         for idx in uv2_index_values])
             uvs = [
                 str((1 - v if flip_u else v) if i == 0 else (1 - v if flip_v else v))
-                for idx, values in sorted(vertex_data[UV2].items())
-                for i, v in enumerate(values)
+                for vx in _sorted_uv2_keys
+                for i, v in enumerate(vertex_data[UV2][vx])
             ]
             ARGS["LayerElementUV2"] = """
                 LayerElementUV: 1 {
@@ -601,7 +611,7 @@ def export_obj(save_path, mapper, data, attr_list, controller):
         return
 
     save_name  = os.path.basename(os.path.splitext(save_path)[0])
-    idx_dict   = data["IDX"]
+    idx_dict   = [int(v) for v in data["IDX"]]
     value_dict = defaultdict(list)
     vertex_data = defaultdict(dict)
 
