@@ -557,15 +557,15 @@ class QueryDialog(object):
         _attr_options = [""] + list(self.available_attrs)
 
         # Attribute mapping
+        _attr_options = [""] + list(self.available_attrs)
         for key, edit in self.button_dict.items():
             val = cfg.get(key, "")
             s.setValue(key, val)
             if self._attr_is_combo:
-                from PySide2 import QtWidgets as _QW
-                if hasattr(edit, "findText"):
-                    idx = edit.findText(val)
-                    if idx >= 0:
-                        edit.setCurrentIndex(idx)
+                # SelectComboOption requires exact match; fall back to "" if not in list
+                _opt = val if val in _attr_options else ""
+                m.SelectComboOption(edit, _opt)
+                s.setValue(key, _opt)
             else:
                 m.SetWidgetText(edit, val)
 
