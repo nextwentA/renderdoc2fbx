@@ -3036,7 +3036,34 @@ def prepare_export(pyrenderdoc, data):
         manager.ErrorDialog("请至少勾选一种模式 (VS Input / VS Output)", "Error")
         return
 
-    # Choose file extension based on selected format
+    # ── Batch EID mode: resolve EIDs first, then show ONE save dialog ────────
+    _batch_eids_str = dialog.mapper.get("BATCH_EIDS", "").strip()
+    if _batch_eids_str:
+        try:
+            _eids = _parse_eids(_batch_eids_str)
+        except Exception as _pe:
+            manager.ErrorDialog("EID 格式错误: %s\n请用逗号和短横线，如: 100,200-210" % _pe, "Error")
+            return
+        if not _eids:
+            manager.ErrorDialog("没有解析到有效 EID", "Error")
+            return
+        # ONE save dialog: user picks any file in the desired output directory
+        _ext_filter = "*.obj" if export_format == "OBJ" else "*.fbx"
+        _out_path = manager.SaveFileName(
+            "选择批量输出目录 (文件名随意，取其所在目录)", "", _ext_filter)
+        if not _out_path:
+            return
+        _out_dir    = os.path.dirname(_out_path)
+        _batch_info = []
+        _batch_eid_export(_eids, _out_dir, dialog.mapper, pyrenderdoc, _batch_info)
+        os.startfile(_out_dir)
+        manager.MessageDialog(
+            "批量导出完成  (%d EIDs)\n\n%s" % (
+                len(_eids), "\n".join(_batch_info[-30:])),
+            "Done!")
+        return
+
+    # ── Single export: show ONE save dialog ──────────────────────────────────
     if export_format == "OBJ":
         save_path = manager.SaveFileName("Save OBJ File", "", "*.obj")
     else:
@@ -3055,32 +3082,6 @@ def prepare_export(pyrenderdoc, data):
 
     fbx_info   = []
     fbx_errors = []
-
-    # ── Batch EID mode: user typed EIDs in the dialog ────────────────────────
-    _batch_eids_str = dialog.mapper.get("BATCH_EIDS", "").strip()
-    if _batch_eids_str:
-        try:
-            _eids = _parse_eids(_batch_eids_str)
-        except Exception as _pe:
-            manager.ErrorDialog("EID 格式错误: %s\n请用逗号和短横线，如: 100,200-210" % _pe, "Error")
-            return
-        if not _eids:
-            manager.ErrorDialog("没有解析到有效 EID", "Error")
-            return
-        # Re-use the save-file dialog to get the output DIRECTORY
-        _out_path = manager.SaveFileName(
-            "选择批量输出目录 (文件名随意，取其所在目录)", "", "*.fbx")
-        if not _out_path:
-            return
-        _out_dir    = os.path.dirname(_out_path)
-        _batch_info = []
-        _batch_eid_export(_eids, _out_dir, dialog.mapper, pyrenderdoc, _batch_info)
-        os.startfile(_out_dir)
-        manager.MessageDialog(
-            "批量导出完成  (%d EIDs)\n\n%s" % (
-                len(_eids), "\n".join(_batch_info[-30:])),
-            "Done!")
-        return
 
     def _add_input_aliases(data, attr_list):
         """Add _inputN ↔ ATTRIBUTE{N} aliases and semantic-name fallbacks.
