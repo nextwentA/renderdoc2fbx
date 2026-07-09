@@ -459,12 +459,15 @@ class QueryDialog(object):
         _cfg_lay = _QW3.QHBoxLayout(_cfg_row)
         _cfg_lay.setContentsMargins(0, 0, 0, 0)
         _cfg_lay.setSpacing(4)
-        _save_btn = m.CreateButton(self._on_save_config)
+        _save_btn  = m.CreateButton(self._on_save_config)
         m.SetWidgetText(_save_btn, "Save Config")
-        _load_btn = m.CreateButton(self._on_load_config)
+        _load_btn  = m.CreateButton(self._on_load_config)
         m.SetWidgetText(_load_btn, "Load Config")
+        _reset_btn = m.CreateButton(self._on_reset_config)
+        m.SetWidgetText(_reset_btn, "Reset Defaults")
         _cfg_lay.addWidget(_save_btn)
         _cfg_lay.addWidget(_load_btn)
+        _cfg_lay.addWidget(_reset_btn)
         _cfg_lay.addStretch()
         self._gl.addWidget(_cfg_row, r, 0, 1, 2); r += 1
 
@@ -505,6 +508,56 @@ class QueryDialog(object):
         except Exception as e:
             _QW.QMessageBox.warning(None, "Load Config", "Failed to load:\n%s" % e)
             return
+        self._apply_config(cfg)
+
+    def _on_reset_config(self, *_):
+        """Reset all settings to factory defaults."""
+        default_engine = "unity"
+        unity_attrs    = _ENGINE_TEMPLATES.get(default_engine, {})
+        cfg = {
+            # Attribute mapping — unity preset
+            "POSITION": unity_attrs.get("POSITION", ""),
+            "NORMAL":   unity_attrs.get("NORMAL",   ""),
+            "TANGENT":  unity_attrs.get("TANGENT",  ""),
+            "BINORMAL": unity_attrs.get("BINORMAL", ""),
+            "COLOR":    unity_attrs.get("COLOR",    ""),
+            "UV":       unity_attrs.get("UV",       ""),
+            "UV2":      unity_attrs.get("UV2",      ""),
+            # Mesh mode
+            "ExportVSIn":  True,
+            "ExportVSOut": False,
+            "ExportFormat": "FBX",
+            "Engine":       default_engine,
+            # VS Output extras
+            "VSOutIncludeVSInUV":      True,
+            "VSOutIncludeVSInUV2":     True,
+            "VSOutIncludeVSInNormal":  True,
+            "VSOutIncludeVSInTangent": True,
+            "VSOutIncludeVSInBinormal":True,
+            "VSOutIncludeVSInColor":   True,
+            "BakeWorldSpace": False,
+            "ExportSkin":     False,
+            # UV
+            "FlipU": False,
+            "FlipV": True,
+            # Texture
+            "ExportTextures":       True,
+            "ExportOutputTextures": True,
+            "TexFormat":     "PNG",
+            "TexDefaultName": True,
+            "TexFbxPrefix":   True,
+            "TexPrefix": "",
+            "TexInfix":  "",
+            "TexSuffix": "",
+            # Shader
+            "ExportShaders":   True,
+            "ShaderFmt":       "Disasm (txt)",
+            "ShaderFbxPrefix": True,
+            "ShaderStages": {k: self.STAGE_DEFAULTS.get(k, False)
+                             for k in self.STAGE_KEYS},
+            # Batch
+            "BatchEIDs": "",
+        }
         self._apply_config(cfg)
 
     def _gather_config(self):
