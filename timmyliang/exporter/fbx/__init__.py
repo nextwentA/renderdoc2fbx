@@ -2711,14 +2711,12 @@ def _batch_eid_export(eids, out_dir, mapper, pyrenderdoc, info_list):
                 break
 
         if not _populated:
-            info_list.append("EID %d: Mesh Viewer table empty after navigation" % eid)
             _cleanup_empty_dir(eid_dir)
             continue
 
         # ── Read mesh data — IDENTICAL to single export path ─────────────
         vsin_data, vsin_attr_list = _collect_mesh_data(_main_win)
         if not vsin_data or not vsin_data.get("IDX"):
-            info_list.append("EID %d: no mesh data in Qt table" % eid)
             _cleanup_empty_dir(eid_dir)
             continue
         vsin_data, vsin_attr_list = _add_vsin_aliases(vsin_data, vsin_attr_list)
@@ -2738,8 +2736,8 @@ def _batch_eid_export(eids, out_dir, mapper, pyrenderdoc, info_list):
                 else:
                     export_fbx(_vsin_path, _vm, vsin_data, vsin_attr_list, None)
                 any_ok = True
-            except Exception as _xe:
-                info_list.append("EID %d: VS Input write failed: %s" % (eid, _xe))
+            except Exception:
+                pass
 
         # ── VS Output export (needs replay thread for GetPostVSData) ──────
         if export_vsout:
@@ -2758,10 +2756,8 @@ def _batch_eid_export(eids, out_dir, mapper, pyrenderdoc, info_list):
                         _export_vsout_fbx(p, m, vi, ve, vd, va, ctrl))
                 if not _vout_errs:
                     any_ok = True
-                else:
-                    info_list.append("EID %d: VS Output error: %s" % (eid, _vout_errs[0][:80]))
-            except Exception as _xe:
-                info_list.append("EID %d: VS Output BlockInvoke: %s" % (eid, _xe))
+            except Exception:
+                pass
 
         if not any_ok:
             _cleanup_empty_dir(eid_dir)
@@ -2771,6 +2767,7 @@ def _batch_eid_export(eids, out_dir, mapper, pyrenderdoc, info_list):
         tex_in, tex_out, shd, shd_err = _run_secondary_exports(
             eid_dir, eid_mapper, pyrenderdoc)
 
+        # Only log EIDs that successfully produced output files
         modes = "+".join(filter(None, [
             ("vsin" if export_vsin else ""),
             ("vsout" if export_vsout else ""),
@@ -3047,13 +3044,12 @@ def prepare_export(pyrenderdoc, data):
         if not _eids:
             manager.ErrorDialog("没有解析到有效 EID", "Error")
             return
-        # ONE save dialog: user picks any file in the desired output directory
-        _ext_filter = "*.obj" if export_format == "OBJ" else "*.fbx"
-        _out_path = manager.SaveFileName(
-            "选择批量输出目录 (文件名随意，取其所在目录)", "", _ext_filter)
-        if not _out_path:
+        # Folder-picker dialog: user selects the output directory directly
+        from PySide2 import QtWidgets as _QW
+        _out_dir = _QW.QFileDialog.getExistingDirectory(
+            None, "选择批量导出目录", "")
+        if not _out_dir:
             return
-        _out_dir    = os.path.dirname(_out_path)
         _batch_info = []
         _batch_eid_export(_eids, _out_dir, dialog.mapper, pyrenderdoc, _batch_info)
         os.startfile(_out_dir)
