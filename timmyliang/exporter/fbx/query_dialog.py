@@ -452,6 +452,22 @@ class QueryDialog(object):
             row_layout.addStretch()
             self._gl.addWidget(row_widget, r, 0, 1, 2); r += 1
 
+        # ── Config JSON Save / Load ───────────────────────────────────
+        self._section(grid, r, "Config"); r += 1
+        from PySide2 import QtWidgets as _QW3
+        _cfg_row = _QW3.QWidget()
+        _cfg_lay = _QW3.QHBoxLayout(_cfg_row)
+        _cfg_lay.setContentsMargins(0, 0, 0, 0)
+        _cfg_lay.setSpacing(4)
+        _save_btn = m.CreateButton(self._on_save_config)
+        m.SetWidgetText(_save_btn, "Save Config")
+        _load_btn = m.CreateButton(self._on_load_config)
+        m.SetWidgetText(_load_btn, "Load Config")
+        _cfg_lay.addWidget(_save_btn)
+        _cfg_lay.addWidget(_load_btn)
+        _cfg_lay.addStretch()
+        self._gl.addWidget(_cfg_row, r, 0, 1, 2); r += 1
+
         return self.widget
 
         return self.widget
@@ -459,6 +475,152 @@ class QueryDialog(object):
     # ------------------------------------------------------------------
     # Callbacks
     # ------------------------------------------------------------------
+
+    def _on_save_config(self, *_):
+        """Save all current settings to a user-chosen JSON file."""
+        from PySide2 import QtWidgets as _QW
+        path, _ = _QW.QFileDialog.getSaveFileName(
+            None, "Save Config", "", "JSON Files (*.json)")
+        if not path:
+            return
+        import json
+        cfg = self._gather_config()
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            _QW.QMessageBox.warning(None, "Save Config", "Failed to save:\n%s" % e)
+
+    def _on_load_config(self, *_):
+        """Load settings from a JSON file and apply them to the dialog."""
+        from PySide2 import QtWidgets as _QW
+        path, _ = _QW.QFileDialog.getOpenFileName(
+            None, "Load Config", "", "JSON Files (*.json)")
+        if not path:
+            return
+        import json
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception as e:
+            _QW.QMessageBox.warning(None, "Load Config", "Failed to load:\n%s" % e)
+            return
+        self._apply_config(cfg)
+
+    def _gather_config(self):
+        """Collect all current settings into a plain dict suitable for JSON."""
+        m   = self.mqt
+        cfg = {}
+        # Attribute mapping
+        for key, edit in self.button_dict.items():
+            if self._attr_is_combo:
+                cfg[key] = self.settings.value(key, "")
+            else:
+                cfg[key] = m.GetWidgetText(edit)
+        # Checkboxes
+        cfg["ExportVSIn"]             = m.IsWidgetChecked(self.vsin_check)
+        cfg["ExportVSOut"]            = m.IsWidgetChecked(self.vsout_check)
+        cfg["VSOutIncludeVSInUV"]     = m.IsWidgetChecked(self.vsout_uv_check)
+        cfg["VSOutIncludeVSInUV2"]    = m.IsWidgetChecked(self.vsout_uv2_check)
+        cfg["VSOutIncludeVSInNormal"] = m.IsWidgetChecked(self.vsout_normal_check)
+        cfg["VSOutIncludeVSInTangent"]= m.IsWidgetChecked(self.vsout_tangent_check)
+        cfg["VSOutIncludeVSInBinormal"]=m.IsWidgetChecked(self.vsout_binorm_check)
+        cfg["VSOutIncludeVSInColor"]  = m.IsWidgetChecked(self.vsout_color_check)
+        cfg["BakeWorldSpace"]         = m.IsWidgetChecked(self.bake_world_check)
+        cfg["ExportSkin"]             = m.IsWidgetChecked(self.export_skin_check)
+        cfg["FlipU"]                  = m.IsWidgetChecked(self.flip_u_check)
+        cfg["FlipV"]                  = m.IsWidgetChecked(self.flip_v_check)
+        cfg["ExportTextures"]         = m.IsWidgetChecked(self.tex_check)
+        cfg["ExportOutputTextures"]   = m.IsWidgetChecked(self.tex_output_check)
+        cfg["TexDefaultName"]         = m.IsWidgetChecked(self.default_name_check)
+        cfg["TexFbxPrefix"]           = m.IsWidgetChecked(self.tex_fbx_prefix_check)
+        cfg["ExportShaders"]          = m.IsWidgetChecked(self.shader_check)
+        cfg["ShaderFbxPrefix"]        = m.IsWidgetChecked(self.shader_fbx_prefix_check)
+        cfg["ShaderStages"]           = {k: m.IsWidgetChecked(v)
+                                         for k, v in self.stage_checks.items()}
+        # Combos
+        cfg["Engine"]      = self.settings.value("Engine",       "unity")
+        cfg["ExportFormat"]= self.settings.value("ExportFormat", "FBX")
+        cfg["TexFormat"]   = self.settings.value("TexFormat",    "PNG")
+        cfg["ShaderFmt"]   = self.settings.value("ShaderFmt",    "Disasm (txt)")
+        # Text fields
+        cfg["BatchEIDs"]   = m.GetWidgetText(self.batch_eids_edit)
+        cfg["TexPrefix"]   = m.GetWidgetText(self.tex_prefix_edit)
+        cfg["TexInfix"]    = m.GetWidgetText(self.tex_infix_edit)
+        cfg["TexSuffix"]   = m.GetWidgetText(self.tex_suffix_edit)
+        return cfg
+
+    def _apply_config(self, cfg):
+        """Apply a config dict (loaded from JSON) to the dialog widgets and settings."""
+        m    = self.mqt
+        s    = self.settings
+        _attr_options = [""] + list(self.available_attrs)
+
+        # Attribute mapping
+        for key, edit in self.button_dict.items():
+            val = cfg.get(key, "")
+            s.setValue(key, val)
+            if self._attr_is_combo:
+                from PySide2 import QtWidgets as _QW
+                if hasattr(edit, "findText"):
+                    idx = edit.findText(val)
+                    if idx >= 0:
+                        edit.setCurrentIndex(idx)
+            else:
+                m.SetWidgetText(edit, val)
+
+        def _set_check(widget, key, default=False):
+            v = cfg.get(key, default)
+            if isinstance(v, bool):
+                m.SetWidgetChecked(widget, v)
+            s.setValue(key, "true" if v else "false")
+
+        _set_check(self.vsin_check,           "ExportVSIn",             True)
+        _set_check(self.vsout_check,          "ExportVSOut",            False)
+        _set_check(self.vsout_uv_check,       "VSOutIncludeVSInUV",     True)
+        _set_check(self.vsout_uv2_check,      "VSOutIncludeVSInUV2",    True)
+        _set_check(self.vsout_normal_check,   "VSOutIncludeVSInNormal", True)
+        _set_check(self.vsout_tangent_check,  "VSOutIncludeVSInTangent",True)
+        _set_check(self.vsout_binorm_check,   "VSOutIncludeVSInBinormal",True)
+        _set_check(self.vsout_color_check,    "VSOutIncludeVSInColor",  True)
+        _set_check(self.bake_world_check,     "BakeWorldSpace",         False)
+        _set_check(self.export_skin_check,    "ExportSkin",             False)
+        _set_check(self.flip_u_check,         "FlipU",                  False)
+        _set_check(self.flip_v_check,         "FlipV",                  True)
+        _set_check(self.tex_check,            "ExportTextures",         True)
+        _set_check(self.tex_output_check,     "ExportOutputTextures",   True)
+        _set_check(self.default_name_check,   "TexDefaultName",         True)
+        _set_check(self.tex_fbx_prefix_check, "TexFbxPrefix",           True)
+        _set_check(self.shader_check,         "ExportShaders",          True)
+        _set_check(self.shader_fbx_prefix_check,"ShaderFbxPrefix",      True)
+
+        for sk, chk in self.stage_checks.items():
+            v = cfg.get("ShaderStages", {}).get(sk, self.STAGE_DEFAULTS.get(sk, False))
+            m.SetWidgetChecked(chk, v)
+            s.setValue("ShaderStage_%s" % sk, "true" if v else "false")
+
+        # Combos — SelectComboOption via MiniQtHelper
+        def _set_combo(widget, key, options, default):
+            val = cfg.get(key, default)
+            if val in options:
+                m.SelectComboOption(widget, val)
+            s.setValue(key, val)
+
+        _set_combo(self.engine_combo,   "Engine",       self.ENGINE_OPTIONS, "unity")
+        _set_combo(self.fmt_combo,      "ExportFormat", self.FORMAT_OPTIONS, "FBX")
+        _set_combo(self.tex_fmt_combo,  "TexFormat",    self.FMT_OPTIONS,    "PNG")
+        _set_combo(self.shader_fmt_combo,"ShaderFmt",   ["Binary","Disasm (txt)"], "Disasm (txt)")
+
+        # Text fields
+        def _set_text(widget, key, default=""):
+            val = cfg.get(key, default)
+            m.SetWidgetText(widget, val)
+            s.setValue(key, val)
+
+        _set_text(self.batch_eids_edit, "BatchEIDs")
+        _set_text(self.tex_prefix_edit, "TexPrefix")
+        _set_text(self.tex_infix_edit,  "TexInfix")
+        _set_text(self.tex_suffix_edit, "TexSuffix")
 
     def _on_engine_changed(self, ctx, widget, text):
         self._apply_template(text)
