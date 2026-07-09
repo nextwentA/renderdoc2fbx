@@ -2687,67 +2687,65 @@ def _batch_eid_export(eids, out_dir, mapper, pyrenderdoc, info_list):
         eid_mapper = dict(mapper)
         eid_mapper["FBX_NAME"] = eid_name
 
-        # ── Step 1: navigate to this EID (UI-level, updates Qt table) ────
-        # pyrenderdoc.SetEventID fires the same signals as clicking in the
-        # Event Browser → Mesh Viewer table is updated synchronously before
-        # Navigate + read all vertex data inside one BlockInvoke so the
-        # replay thread is in the correct state for the entire operation.
-        _per_info  = []
-        _per_errs  = []
-        _vsin_data = [None]
-        _vsin_alist= [None]
-
-        def _do_eid(ctrl,
-                    _e=eid, _m=eid_mapper, _d=_vsin_data, _a=_vsin_alist,
-                    _info=_per_info, _errs=_per_errs):
-            try:
-                ctrl.SetFrameEvent(_e, True)
-                _ad, _ni = _read_vsin_attrs_from_gpu(_m, _info, ctrl)
-                if not _ad or not _ni:
-                    _errs.append("no vertex data from GPU")
-                    return
-                _d[0], _a[0] = _alias_vsin_data(_ad, _ni)
-            except Exception:
-                import traceback as _tb
-                _errs.append(_tb.format_exc()[-200:])
-
+        # ── Navigate: same as user clicking EID in Event Browser ─────────
+        # SetEventID is the UI-level navigation that updates the Qt Mesh
+        # Viewer table (just like single export does when the user is at
+        # the target EID).  We then spin processEvents() until the table
+        # is populated — the Mesh Viewer fills the table asynchronously
+        # after receiving the EventChanged signal.
         try:
-            pyrenderdoc.Replay().BlockInvoke(_do_eid)
+            pyrenderdoc.SetEventID([], eid, eid)
         except Exception as _e:
-            info_list.append("EID %d: BlockInvoke failed: %s" % (eid, _e))
+            info_list.append("EID %d: SetEventID failed: %s" % (eid, _e))
             _cleanup_empty_dir(eid_dir)
             continue
 
-        if _per_errs:
-            info_list.append("EID %d: ERROR — %s" % (eid, _per_errs[0][:80]))
+        from PySide2 import QtWidgets as _QW
+        _main_win = pyrenderdoc.GetMainWindow().Widget()
+        _tbl = (_main_win.findChild(_QW.QTableView, "vsinData") or
+                _main_win.findChild(_QW.QTableView, "inTable"))
+
+        # Spin the event loop until the Mesh Viewer table is non-empty.
+        # Typically 1-3 processEvents() cycles are enough; 100 × 20 ms = 2 s max.
+        _populated = False
+        for _ in range(100):
+            _QW.QApplication.processEvents()
+            if _tbl and _tbl.model() and _tbl.model().rowCount() > 0:
+                _populated = True
+                break
+
+        if not _populated:
+            info_list.append("EID %d: Mesh Viewer table empty after navigation" % eid)
             _cleanup_empty_dir(eid_dir)
             continue
 
-        vsin_data    = _vsin_data[0]
-        vsin_attr_list = _vsin_alist[0]
+        # ── Read mesh data — IDENTICAL to single export path ─────────────
+        vsin_data, vsin_attr_list = _collect_mesh_data(_main_win)
+        if not vsin_data or not vsin_data.get("IDX"):
+            info_list.append("EID %d: no mesh data in Qt table" % eid)
+            _cleanup_empty_dir(eid_dir)
+            continue
+        vsin_data, vsin_attr_list = _add_vsin_aliases(vsin_data, vsin_attr_list)
 
         any_ok = False
 
-        # ── VS Input export ───────────────────────────────────────────────
+        # ── VS Input export — same as single export ───────────────────────
         if export_vsin:
-            if not vsin_data:
-                info_list.append("EID %d: VS Input — no data from GPU" % eid)
-            else:
-                _vsin_path = os.path.join(eid_dir,
-                    (eid_name + "_vsin" if both else eid_name) + ext)
-                _vm = dict(eid_mapper)
-                _vm["MESH_MODE"] = "VS Input"
-                _vm["FBX_NAME"]  = os.path.basename(os.path.splitext(_vsin_path)[0])
-                try:
-                    if ext == ".obj":
-                        export_obj(_vsin_path, _vm, vsin_data, vsin_attr_list, None)
-                    else:
-                        export_fbx(_vsin_path, _vm, vsin_data, vsin_attr_list, None)
-                    any_ok = True
-                except Exception as _xe:
-                    info_list.append("EID %d: VS Input write failed: %s" % (eid, _xe))
+            _vsin_path = os.path.join(eid_dir,
+                (eid_name + "_vsin" if both else eid_name) + ext)
+            _vm = dict(eid_mapper)
+            _vm["MESH_MODE"] = "VS Input"
+            _vm["FBX_NAME"]  = os.path.basename(os.path.splitext(_vsin_path)[0])
+            try:
+                if ext == ".obj":
+                    export_obj(_vsin_path, _vm, vsin_data, vsin_attr_list, None)
+                else:
+                    export_fbx(_vsin_path, _vm, vsin_data, vsin_attr_list, None)
+                any_ok = True
+            except Exception as _xe:
+                info_list.append("EID %d: VS Input write failed: %s" % (eid, _xe))
 
-        # ── VS Output export (needs replay thread) ────────────────────────
+        # ── VS Output export (needs replay thread for GetPostVSData) ──────
         if export_vsout:
             _vsout_path = os.path.join(eid_dir,
                 (eid_name + "_vsout" if both else eid_name) + ext)
