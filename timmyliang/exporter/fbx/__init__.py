@@ -823,19 +823,49 @@ def _read_vsin_attrs_from_gpu(mapper, info_list, controller):
         # Build this BEFORE reading the layout, so each attribute can be read
         # from the correct VB binding (split-VB layout: position in slot 0,
         # normals/UVs in slot 1 etc.).
-        _vb_map = {0: (vb_data, stride, nv)}   # slot 0 = primary from GetPostVSData
+        #
+        # CRITICAL: fmt_in.vertexByteOffset already accounts for both the
+        # binding byte-offset AND the base-vertex adjustment:
+        #   vertexByteOffset = binding_offset + vertex_start × stride
+        # GetVertexBuffers()[slot].byteOffset is ONLY the binding_offset.
+        # We must NOT overwrite slot 0 with the GetVertexBuffers data because
+        # that would lose the vertex_start correction and cause wrong reads.
+        #
+        # Strategy:
+        #  - slot 0 (primary) → always use vb_data (already correct)
+        #  - slot N (secondary) → use GetVertexBuffers data, but apply the
+        #    same vertex_start offset so all slots start at the same logical
+        #    first vertex.
+        _vb_map = {0: (vb_data, stride, nv)}   # slot 0: primary, correct offset
+
         try:
-            _state0 = controller.GetPipelineState()
+            _state0  = controller.GetPipelineState()
             _vb_list = _state0.GetVertexBuffers()
+
+            # Compute vertex_start from primary VB (binding_offset for slot 0)
+            _bind0_off  = 0
+            for _vb_b in _vb_list:
+                if getattr(_vb_b, 'resourceId', None) == fmt_in.vertexResourceId:
+                    _bind0_off = int(getattr(_vb_b, 'byteOffset', 0) or 0)
+                    break
+            _vertex_start = (vbo_off - _bind0_off) // stride if stride > 0 else 0
+
             for _bi, _vb_b in enumerate(_vb_list):
-                _rid   = getattr(_vb_b, 'resourceId', None)
-                _boff  = int(getattr(_vb_b, 'byteOffset',  0) or 0)
-                _bstr  = int(getattr(_vb_b, 'byteStride',  0) or 0)
+                _rid  = getattr(_vb_b, 'resourceId', None)
+                _boff = int(getattr(_vb_b, 'byteOffset', 0) or 0)
+                _bstr = int(getattr(_vb_b, 'byteStride', 0) or 0)
                 if not _rid or _rid == rd.ResourceId.Null() or _bstr <= 0:
                     continue
-                _raw_b  = bytes(controller.GetBufferData(_rid, 0, 0))
-                _data_b = _raw_b[_boff:] if _boff < len(_raw_b) else _raw_b
-                _nv_b   = len(_data_b) // _bstr
+                if _rid == fmt_in.vertexResourceId:
+                    # PRIMARY VB: reuse vb_data (already has correct vertex_start)
+                    _vb_map[_bi] = (vb_data, stride, nv)
+                    continue
+                # SECONDARY VB: apply vertex_start so all slots start at same vertex
+                _raw_b       = bytes(controller.GetBufferData(_rid, 0, 0))
+                _eff_off     = _boff + _vertex_start * _bstr
+                _data_b      = _raw_b[_eff_off:] if _eff_off < len(_raw_b) else \
+                               _raw_b[_boff:] if _boff < len(_raw_b) else _raw_b
+                _nv_b        = len(_data_b) // _bstr
                 _vb_map[_bi] = (_data_b, _bstr, _nv_b)
         except Exception as _vbe:
             info_list.append("vsin_gpu: GetVertexBuffers err: %s" % _vbe)
