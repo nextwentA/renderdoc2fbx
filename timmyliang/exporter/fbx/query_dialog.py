@@ -348,6 +348,9 @@ class QueryDialog(object):
                 _initial = _auto_initial.get(key, "")
                 if not _initial and _saved in _attr_options:
                     _initial = _saved
+                # Persist initial value now — SelectComboOption may not fire
+                # the callback, so settings might otherwise keep a stale value.
+                self.settings.setValue(key, _initial)
                 edit = self._combo(_attr_options, _initial,
                                    partial(self._on_attr_changed, key))
             else:
@@ -543,12 +546,20 @@ class QueryDialog(object):
     def _accept(self, ctx, widget, text):
         m = self.mqt
 
-        # Attribute mapping — read current widget value and persist to settings
+        # Attribute mapping
+        # For combo boxes: read from settings (updated by _on_attr_changed
+        # callback on every selection change, and saved during init_ui).
+        # GetWidgetText is unreliable for MiniQtHelper combo boxes — it may
+        # return "" instead of the selected option text.
+        # For text boxes: read directly from the widget as before.
         self.mapper = {}
         for key, edit in self.button_dict.items():
-            val = m.GetWidgetText(edit)
+            if self._attr_is_combo:
+                val = self.settings.value(key, "")
+            else:
+                val = m.GetWidgetText(edit)
+                self.settings.setValue(key, val)
             self.mapper[key] = val
-            self.settings.setValue(key, val)
 
         # General export options
         self.mapper["ENGINE"]        = self.settings.value("Engine",      "unity")
