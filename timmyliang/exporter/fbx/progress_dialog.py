@@ -29,7 +29,7 @@ class MProgressDialog(QtWidgets.QProgressDialog):
         super(MProgressDialog, self).__init__(parent)
         self.setWindowFlags(self.windowFlags())
         self.setWindowModality(QtCore.Qt.WindowModal)
-        self.setWindowTitle(status if title else title)
+        self.setWindowTitle(title if title else u"正在导出资源")
         self.setMinimumWidth(520)
         bar = QtWidgets.QProgressBar(self)
         bar.setFixedHeight(22)
