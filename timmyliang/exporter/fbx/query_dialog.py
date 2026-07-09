@@ -103,11 +103,12 @@ class QueryDialog(object):
                       "HS": False, "DS": False, "CS": False}
 
     def __init__(self, mqt, available_attrs=None):
-        self.mqt             = mqt
-        self.button_dict     = {}
-        self.stage_checks    = {}
-        self.mapper          = {}
-        self.available_attrs = available_attrs or []
+        self.mqt              = mqt
+        self.button_dict      = {}
+        self.stage_checks     = {}
+        self.mapper           = {}
+        self.available_attrs  = available_attrs or []
+        self._attr_is_combo   = False   # True when combo boxes used for attr fields
         name = "RenderDoc_%s.ini" % self.__class__.__name__
         path = os.path.join(tempfile.gettempdir(), name)
         self.settings = QtCore.QSettings(path, QtCore.QSettings.IniFormat)
@@ -189,7 +190,10 @@ class QueryDialog(object):
         for key, edit in self.button_dict.items():
             value = config.get(key, "")
             self.settings.setValue(key, value)
-            self.mqt.SetWidgetText(edit, value)
+            if self._attr_is_combo:
+                self.mqt.SelectComboOption(edit, value)
+            else:
+                self.mqt.SetWidgetText(edit, value)
 
     # ------------------------------------------------------------------
     # Auto-detect from available attributes
@@ -200,9 +204,14 @@ class QueryDialog(object):
         detected = _detect_attrs(self.available_attrs)
         for key, edit in self.button_dict.items():
             value = detected.get(key, "")
-            if value:
-                self.settings.setValue(key, value)
-                self.mqt.SetWidgetText(edit, value)
+            if self._attr_is_combo:
+                self.mqt.SelectComboOption(edit, value)
+                if value:
+                    self.settings.setValue(key, value)
+            else:
+                if value:
+                    self.settings.setValue(key, value)
+                    self.mqt.SetWidgetText(edit, value)
 
     # ------------------------------------------------------------------
     # Main UI builder
@@ -248,17 +257,18 @@ class QueryDialog(object):
         grid = None          # kept as dummy parameter for helper methods
         r = 0
 
-        # ── Available Attributes (info only) ──────────────────────────────
+        # ── Available Attributes (text box, scrollable) ───────────────────
+        self._section(grid, r, "Mesh Export"); r += 1
         if self.available_attrs:
-            attrs_str = ", ".join(self.available_attrs)
-            if len(attrs_str) > 80:
-                attrs_str = attrs_str[:77] + "..."
-            self._section(grid, r, "Mesh Export"); r += 1
+            from PySide2 import QtWidgets as _QW2
+            _attrs_box = _QW2.QPlainTextEdit()
+            _attrs_box.setReadOnly(True)
+            _attrs_box.setFixedHeight(64)
+            _attrs_box.setPlainText("  ".join(self.available_attrs))
+            _attrs_box.setLineWrapMode(_QW2.QPlainTextEdit.WidgetWidth)
             self._gl.addWidget(self._label("Found attrs:"), r, 0, 1, 1)
-            self._gl.addWidget(self._label(attrs_str),      r, 1, 1, 1)
+            self._gl.addWidget(_attrs_box,                  r, 1, 1, 1)
             r += 1
-        else:
-            self._section(grid, r, "Mesh Export"); r += 1
 
         # ── Engine preset ──────────────────────────────────────────────
         saved_engine     = self.settings.value("Engine", "unity")
@@ -309,17 +319,32 @@ class QueryDialog(object):
         self._add_row(grid, r, "批量EID(如:100,200-210)", self.batch_eids_edit); r += 1
 
         # ── Attribute mapping fields ───────────────────────────────────
-        self.button_dict = {}
+        # When VS Input attrs are available: dropdown populated from found
+        # attrs; initial selection = auto-detected name, fallback to saved.
+        # When no attrs found: plain text box for manual input.
+        self.button_dict     = {}
+        self._attr_is_combo  = bool(self.available_attrs)
+        _attr_options        = [""] + list(self.available_attrs)  # "" = no mapping
+        _auto_initial        = _detect_attrs(self.available_attrs) if self.available_attrs else {}
+
         for key, label_text in self.edit_config:
-            edit = m.CreateTextBox(True, partial(self._on_attr_changed, key))
-            m.SetWidgetText(edit, "")
-            saved = self.settings.value(key, "")
-            if saved:
-                m.SetWidgetText(edit, saved)
+            if self._attr_is_combo:
+                # Pick initial selection: auto-detect > saved (if in list) > ""
+                _saved   = self.settings.value(key, "")
+                _initial = _auto_initial.get(key, "")
+                if not _initial and _saved in _attr_options:
+                    _initial = _saved
+                edit = self._combo(_attr_options, _initial,
+                                   partial(self._on_attr_changed, key))
+            else:
+                edit = m.CreateTextBox(True, partial(self._on_attr_changed, key))
+                saved = self.settings.value(key, "")
+                if saved:
+                    m.SetWidgetText(edit, saved)
             self.button_dict[key] = edit
             self._add_row(grid, r, label_text, edit); r += 1
 
-        # ── Auto-detect button (visible only when attrs were found) ────
+        # ── Auto-detect button (reset combos / fill text boxes) ───────
         if self.available_attrs:
             detect_btn = m.CreateButton(self._apply_auto_detect)
             m.SetWidgetText(detect_btn, "Auto-detect Attributes")
