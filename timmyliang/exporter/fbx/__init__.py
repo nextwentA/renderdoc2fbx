@@ -2449,6 +2449,61 @@ def _cleanup_empty_dir(path):
     except OSError:
         pass
 
+def _add_vsin_aliases(data, attr_list):
+    """Module-level alias helper — same logic as the nested _add_input_aliases
+    in prepare_export, but accessible from _batch_eid_export.
+
+    Adds _inputN ↔ ATTRIBUTE{N} bidirectional aliases and semantic-name
+    fallbacks so any engine preset (Unity POSITION, Godot VERTEX, Unreal
+    ATTRIBUTE0 …) resolves correctly against Vulkan _inputN column names.
+    """
+    if data is None:
+        return data, attr_list
+    added = {}
+    for k in list(data.keys()):
+        if k.startswith("_input"):
+            try:
+                n     = int(k[len("_input"):])
+                alias = "ATTRIBUTE%d" % n
+                if alias not in data:
+                    added[alias] = data[k]
+            except ValueError:
+                pass
+        elif k.startswith("ATTRIBUTE"):
+            try:
+                n     = int(k[len("ATTRIBUTE"):])
+                alias = "_input%d" % n
+                if alias not in data:
+                    added[alias] = data[k]
+            except ValueError:
+                pass
+    _SEM_FALLBACKS = [
+        ("POSITION",   ["_input0", "ATTRIBUTE0"]),
+        ("VERTEX",     ["_input0", "ATTRIBUTE0"]),
+        ("SV_Position",["_input0", "ATTRIBUTE0"]),
+        ("TEXCOORD0",  ["_input3", "ATTRIBUTE3", "_input4", "ATTRIBUTE4"]),
+        ("TEXCOORD1",  ["_input4", "ATTRIBUTE4", "_input5", "ATTRIBUTE5"]),
+        ("UV",         ["_input3", "ATTRIBUTE3", "_input4", "ATTRIBUTE4"]),
+        ("UV2",        ["_input4", "ATTRIBUTE4", "_input5", "ATTRIBUTE5"]),
+        ("COLOR",      ["_input5", "ATTRIBUTE5", "_input6", "ATTRIBUTE6"]),
+        ("COLOR0",     ["_input5", "ATTRIBUTE5", "_input6", "ATTRIBUTE6"]),
+    ]
+    _all = dict(data)
+    _all.update(added)
+    for _sem, _cands in _SEM_FALLBACKS:
+        if _sem in _all:
+            continue
+        for _c in _cands:
+            if _c in _all:
+                added[_sem] = _all[_c]
+                _all[_sem]  = _all[_c]
+                break
+    if added:
+        data.update(added)
+        if attr_list is not None:
+            attr_list = set(attr_list) | set(added.keys())
+    return data, attr_list
+
 def _parse_eids(text):
     """Parse "100,200-210,300" → sorted unique list [100,200,201,...,210,300]."""
     result = []
@@ -2529,23 +2584,25 @@ def _alias_vsin_data(attr_data, vsin_nidxs):
 
 
 def _batch_eid_export(eids, out_dir, mapper, pyrenderdoc, info_list):
-    """Export VS Input mesh + textures + shaders for each EID.
+    """Export VS Input / VS Output mesh + textures + shaders for each EID.
 
-    For each EID in *eids*:
-      1. SetFrameEvent to navigate the replay to that draw call.
-      2. Read VS Input vertex data from GPU (_read_vsin_attrs_from_gpu).
-      3. Convert per-vertex → per-corner, add aliases.
-      4. Write FBX/OBJ per selected mode (VS Input / VS Output / both).
-      5. Export textures & shaders to same sub-directory.
+    VS Input path mirrors single export exactly:
+      SetFrameEvent → QApplication.processEvents() → _collect_mesh_data (Qt table)
+      → _add_vsin_aliases → export_fbx
+    This avoids the raw-byte decoding differences that made _read_vsin_attrs_from_gpu
+    produce a different mesh than the Qt Mesh Viewer.
 
-    After all exports the original event is restored so the RenderDoc
-    UI doesn't get stuck on the last exported EID.
+    VS Output path uses _export_vsout_fbx inside BlockInvoke (needs replay thread).
     """
+    from PySide2 import QtWidgets as _QW
+
     export_fmt  = mapper.get("EXPORT_FORMAT", "FBX")
     ext         = ".obj" if export_fmt == "OBJ" else ".fbx"
     export_vsin  = mapper.get("EXPORT_VSIN",  True)
     export_vsout = mapper.get("EXPORT_VSOUT", False)
     both         = export_vsin and export_vsout
+
+    main_window = pyrenderdoc.GetMainWindow().Widget()
 
     # ── Save current EID so we can restore the UI after batch ────────────
     _orig_eid = [None]
@@ -2566,93 +2623,86 @@ def _batch_eid_export(eids, out_dir, mapper, pyrenderdoc, info_list):
         eid_mapper = dict(mapper)
         eid_mapper["FBX_NAME"] = eid_name
 
-        per_info   = []
-        per_errors = []
-
-        # Collect result from inside BlockInvoke
-        _result = [None]
-
-        def _do_one(ctrl,
-                    _eid=eid, _mapper=eid_mapper, _dir=eid_dir,
-                    _name=eid_name, _ext=ext,
-                    _info=per_info, _errs=per_errors,
-                    _res=_result,
-                    _do_vsin=export_vsin, _do_vsout=export_vsout, _both=both):
-            try:
-                ctrl.SetFrameEvent(_eid, True)
-
-                # Read VS Input attributes from GPU (needed for both modes)
-                _attr_data, _nidxs = _read_vsin_attrs_from_gpu(_mapper, _info, ctrl)
-                if not _attr_data or not _nidxs:
-                    _errs.append("EID %d: no vertex data from GPU" % _eid)
-                    return
-
-                # Convert to per-corner data dict + aliases
-                _data, _alist = _alias_vsin_data(_attr_data, _nidxs)
-
-                # ── VS Input export ────────────────────────────────────
-                if _do_vsin:
-                    _vsin_path = os.path.join(_dir,
-                        (_name + "_vsin" if _both else _name) + _ext)
-                    _vm = dict(_mapper)
-                    _vm["MESH_MODE"] = "VS Input"
-                    _vm["FBX_NAME"]  = os.path.basename(
-                        os.path.splitext(_vsin_path)[0])
-                    if _ext == ".obj":
-                        export_obj(_vsin_path, _vm, _data, _alist, ctrl)
-                    else:
-                        export_fbx(_vsin_path, _vm, _data, _alist, ctrl)
-
-                # ── VS Output export ───────────────────────────────────
-                if _do_vsout:
-                    _vsout_path = os.path.join(_dir,
-                        (_name + "_vsout" if _both else _name) + _ext)
-                    _vom = dict(_mapper)
-                    _vom["MESH_MODE"] = "VS Output"
-                    _vom["FBX_NAME"]  = os.path.basename(
-                        os.path.splitext(_vsout_path)[0])
-                    _verrs = []
-                    _export_vsout_fbx(_vsout_path, _vom, _info, _verrs,
-                                      _data, _alist, ctrl)
-                    if _verrs:
-                        _errs.append("vsout: " + _verrs[0][:60])
-
-                _res[0] = True
-
-            except Exception:
-                import traceback as _tb
-                _errs.append(_tb.format_exc()[-200:])
-
+        # ── Step 1: navigate replay to this EID ──────────────────────────
         try:
-            pyrenderdoc.Replay().BlockInvoke(_do_one)
+            pyrenderdoc.Replay().BlockInvoke(
+                lambda ctrl, e=eid: ctrl.SetFrameEvent(e, True))
         except Exception as _e:
-            info_list.append("EID %d: BlockInvoke failed: %s" % (eid, _e))
+            info_list.append("EID %d: SetFrameEvent failed: %s" % (eid, _e))
             _cleanup_empty_dir(eid_dir)
             continue
 
-        if per_errors:
-            info_list.append("EID %d: ERROR — %s" % (eid, per_errors[0][:80]))
+        # ── Step 2: flush Qt events so Mesh Viewer table refreshes ───────
+        _QW.QApplication.processEvents()
+
+        # ── Step 3: read VS Input from Qt Mesh Viewer table ──────────────
+        # This is IDENTICAL to single export (_collect_mesh_data reads the
+        # same table that the user sees, already decoded by RenderDoc).
+        vsin_data, vsin_attr_list = _collect_mesh_data(main_window)
+        if vsin_data:
+            vsin_data, vsin_attr_list = _add_vsin_aliases(vsin_data, vsin_attr_list)
+
+        any_ok = False
+
+        # ── Step 4: VS Input export (export_fbx needs no controller) ─────
+        if export_vsin:
+            if not vsin_data:
+                info_list.append("EID %d: VS Input — no data in Qt table" % eid)
+            else:
+                _vsin_path = os.path.join(eid_dir,
+                    (eid_name + "_vsin" if both else eid_name) + ext)
+                _vm = dict(eid_mapper)
+                _vm["MESH_MODE"] = "VS Input"
+                _vm["FBX_NAME"]  = os.path.basename(os.path.splitext(_vsin_path)[0])
+                try:
+                    if ext == ".obj":
+                        export_obj(_vsin_path, _vm, vsin_data, vsin_attr_list, None)
+                    else:
+                        export_fbx(_vsin_path, _vm, vsin_data, vsin_attr_list, None)
+                    any_ok = True
+                except Exception as _xe:
+                    info_list.append("EID %d: VS Input write failed: %s" % (eid, _xe))
+
+        # ── Step 5: VS Output export (needs replay thread) ────────────────
+        if export_vsout:
+            _vsout_path = os.path.join(eid_dir,
+                (eid_name + "_vsout" if both else eid_name) + ext)
+            _vom = dict(eid_mapper)
+            _vom["MESH_MODE"] = "VS Output"
+            _vom["FBX_NAME"]  = os.path.basename(os.path.splitext(_vsout_path)[0])
+            _vout_info = []
+            _vout_errs = []
+            try:
+                pyrenderdoc.Replay().BlockInvoke(
+                    lambda ctrl, p=_vsout_path, m=_vom,
+                           vd=vsin_data, va=vsin_attr_list,
+                           vi=_vout_info, ve=_vout_errs:
+                        _export_vsout_fbx(p, m, vi, ve, vd, va, ctrl))
+                if not _vout_errs:
+                    any_ok = True
+                else:
+                    info_list.append("EID %d: VS Output error: %s" % (eid, _vout_errs[0][:80]))
+            except Exception as _xe:
+                info_list.append("EID %d: VS Output BlockInvoke: %s" % (eid, _xe))
+
+        if not any_ok:
             _cleanup_empty_dir(eid_dir)
             continue
 
-        if not _result[0]:
-            info_list.append("EID %d: skipped (no data)" % eid)
-            _cleanup_empty_dir(eid_dir)
-            continue
-
-        # Export textures / shaders (each uses its own BlockInvoke internally)
+        # ── Step 6: textures & shaders ────────────────────────────────────
         tex_in, tex_out, shd, shd_err = _run_secondary_exports(
             eid_dir, eid_mapper, pyrenderdoc)
 
-        info_list.append("EID %d: OK  mesh+tex(%d)+shd(%d)%s" % (
-            eid, len(tex_in), len(shd),
+        modes = "+".join(filter(None, [
+            ("vsin" if export_vsin else ""),
+            ("vsout" if export_vsout else ""),
+        ]))
+        info_list.append("EID %d: OK  %s+tex(%d)+shd(%d)%s" % (
+            eid, modes, len(tex_in), len(shd),
             (" ERR:" + shd_err[0][:40]) if shd_err else ""))
-        if per_info:
-            info_list.append("  [%s]" % per_info[-1])
 
     finally:
-        # ── Restore the original event so the RenderDoc UI doesn't stay ──
-        # stuck on the last exported EID (which may have no mesh data).
+        # ── Restore the original event ────────────────────────────────────
         if _orig_eid[0] is not None:
             try:
                 pyrenderdoc.Replay().BlockInvoke(
